@@ -10,6 +10,7 @@ const S = {
   selected: null,       // selected vault entry name
   revealed: new Map(),  // name -> plaintext (client memory only)
   sort: { scan: ["file", 1], vault: ["name", 1] },
+  home: null,           // /api/home/state payload
   confirmAction: null,
   browsePath: "",
 };
@@ -307,6 +308,222 @@ async function doInject() {
   } catch (e) { setStatus("Inject failed: " + e.message); }
 }
 
+/* ---------------- home manager ---------------- */
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+function relTime(iso) {
+  const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+  if (s < 90) return "just now";
+  if (s < 3600) return Math.round(s / 60) + "m ago";
+  if (s < 86400) return Math.round(s / 3600) + "h ago";
+  if (s < 86400 * 30) return Math.round(s / 86400) + "d ago";
+  return new Date(iso).toLocaleDateString();
+}
+function fmtBytes(n) {
+  if (n == null) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
+  if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
+  return (n / 1073741824).toFixed(2) + " GB";
+}
+function pillEl(cls, text, title) {
+  const p = el("span", "pill " + cls, text);
+  if (title) p.title = title;
+  return p;
+}
+// The pill: last backup — when, and where it went.
+function backupPill(d) {
+  const b = d.lastBackup;
+  if (!b) return pillEl("never", "○ No backups yet — " + d.where, "Nothing has been backed up to this destination yet");
+  const abs = new Date(b.at).toLocaleString() + " · " + b.files + " file(s) · " + fmtBytes(b.bytes);
+  if (!b.ok) return pillEl("error", "✗ Backup failed " + relTime(b.at) + " — " + d.where, b.note || abs);
+  const ageH = (Date.now() - new Date(b.at)) / 36e5;
+  return pillEl(ageH < 24 ? "fresh" : "stale", "● Backed up " + relTime(b.at) + " → " + d.where, abs);
+}
+
+function renderHome() {
+  const st = S.home;
+  if (!st) return;
+  $("#home-unconfigured").classList.toggle("hidden", st.configured);
+  $("#home-main").classList.toggle("hidden", !st.configured);
+  $("#btn-home-backup-all").disabled = !st.configured || !st.destinations.length;
+  if (!st.configured) return;
+
+  const wrap = $("#home-dests");
+  wrap.innerHTML = "";
+  if (!st.destinations.length) {
+    wrap.appendChild(el("div", "home-note", "No destinations yet — add one below. Backups land in an “enclave-home” folder on the destination."));
+  }
+  for (const d of st.destinations) {
+    const card = el("div", "dest-card");
+    const head = el("div", "dest-head");
+    head.append(el("span", "dest-name", d.name), el("span", "dest-type", d.type), el("span", "dest-where", d.where));
+    card.appendChild(head);
+    const pills = el("div", "dest-pills");
+    pills.appendChild(backupPill(d));
+    if (d.mounted === false) pills.appendChild(pillEl("warn", "⚠ Not mounted", "Not a live mount point — backups will refuse until the drive/share is mounted"));
+    else if (d.mounted === true) pills.appendChild(pillEl("stale", "Mounted", "The destination is a live mount point"));
+    if (d.lastRestore) {
+      const r = d.lastRestore;
+      pills.appendChild(pillEl(r.ok ? "stale" : "error",
+        (r.ok ? "Restored " : "Restore failed ") + relTime(r.at) + " · " + r.files + " file(s)",
+        new Date(r.at).toLocaleString()));
+    }
+    card.appendChild(pills);
+    if (d.lastBackup && d.lastBackup.note) card.appendChild(el("div", "dest-note", d.lastBackup.note));
+    const actions = el("div", "dest-actions");
+    const bBtn = el("button", "tbtn primary", "Back up");
+    bBtn.addEventListener("click", () => doHomeBackup(d.name));
+    const rBtn = el("button", "tbtn", "Restore…");
+    rBtn.addEventListener("click", () => doHomeRestore(d));
+    const xBtn = el("button", "tbtn danger", "Remove");
+    xBtn.addEventListener("click", () => doHomeDestRemove(d));
+    actions.append(bBtn, rBtn, xBtn);
+    card.appendChild(actions);
+    wrap.appendChild(card);
+  }
+
+  const needsOd = st.destinations.some((d) => d.type === "opendrive");
+  $("#home-od-creds").classList.toggle("hidden", !(needsOd && !st.opendriveConfigured));
+
+  const fw = $("#home-files");
+  fw.innerHTML = "";
+  if (!st.files.length) fw.appendChild(el("div", "home-note", "Nothing selected yet — add home-relative paths below (files or folders)."));
+  for (const f of st.files) {
+    const row = el("div", "home-file-row");
+    row.appendChild(el("span", "home-file-path", f.path));
+    row.appendChild(el("span", "home-file-meta", f.exists ? (f.dir ? "folder" : fmtBytes(f.size)) : "missing"));
+    const rm = el("button", "tbtn", "Remove");
+    rm.addEventListener("click", async () => {
+      try { S.home = await post("/api/home/remove", { path: f.path }); renderHome(); }
+      catch (e) { setStatus("Remove failed: " + e.message); }
+    });
+    row.appendChild(rm);
+    fw.appendChild(row);
+  }
+
+  const sw = $("#home-stow");
+  sw.innerHTML = "";
+  if (st.stow) {
+    sw.appendChild(el("div", "home-note", st.stow.dir + " → " + st.stow.target + (st.stow.packages.length ? "" : " · no packages found")));
+    if (st.stow.packages.length) {
+      const prow = el("div", "dest-pills");
+      for (const p of st.stow.packages) {
+        prow.appendChild(pillEl(p.stowed ? "fresh" : "never",
+          (p.stowed ? "● " : "○ ") + p.name + (p.stowed ? " stowed" : " not stowed"),
+          "Package " + p.name));
+      }
+      sw.appendChild(prow);
+    }
+    const actions = el("div", "dest-actions");
+    const ob = el("button", "tbtn", "Open dotfiles project");
+    ob.title = "Switch the project to the stow directory — Stow / Unstow live in its Vault toolbar";
+    ob.addEventListener("click", async () => {
+      try {
+        S.state = await post("/api/project", { dir: st.stow.dir });
+        renderState();
+        switchView("vault");
+      } catch (e) { setStatus("Open failed: " + e.message); }
+    });
+    actions.appendChild(ob);
+    sw.appendChild(actions);
+    if (document.activeElement !== $("#home-stowdir")) $("#home-stowdir").value = st.stow.dir;
+  } else {
+    sw.appendChild(el("div", "home-note", "No stow directory configured — set one below (e.g. ~/dotfiles), or leave it if you don't use GNU Stow."));
+  }
+}
+
+async function refreshHome() {
+  try { S.home = await api("/api/home/state"); renderHome(); }
+  catch (e) { setStatus("Home state failed: " + e.message); }
+}
+async function doHomeBackup(name) {
+  setStatus("Backing up" + (name ? " to " + name : " to all destinations") + "…");
+  try {
+    const r = await post("/api/home/backup", name ? { dest: name } : {});
+    S.home = r.status;
+    renderHome();
+    setStatus("Backup done — " + r.results.map((x) => x.rec
+      ? `${x.name}: ${x.rec.files} file(s), ${fmtBytes(x.rec.bytes)}`
+      : `${x.name}: FAILED — ${x.error}`).join(" · "));
+  } catch (e) { await refreshHome(); setStatus("Backup failed: " + e.message); }
+}
+function doHomeRestore(d) {
+  showConfirm({
+    title: "Restore from " + d.name + "?",
+    msg: "Selected files will be copied back from " + d.where + " into your home directory, overwriting what is there. Anything outside the selection is untouched.",
+    confirmLabel: "Restore",
+    danger: true,
+    onConfirm: async () => {
+      try {
+        const r = await post("/api/home/restore", { dest: d.name });
+        S.home = r.status;
+        renderHome();
+        setStatus(`Restored ${r.rec.files} file(s) from ${d.name}.`);
+      } catch (e) { await refreshHome(); setStatus("Restore failed: " + e.message); }
+    },
+  });
+}
+function doHomeDestRemove(d) {
+  showConfirm({
+    title: "Remove destination " + d.name + "?",
+    msg: "Its config and backup history are removed. Files already backed up there are NOT deleted.",
+    confirmLabel: "Remove",
+    danger: true,
+    onConfirm: async () => {
+      try { S.home = await post("/api/home/dest/remove", { name: d.name }); renderHome(); }
+      catch (e) { setStatus("Remove failed: " + e.message); }
+    },
+  });
+}
+async function doHomeInit() {
+  try { S.home = await post("/api/home/config", {}); renderHome(); setStatus("Home config created at ~/.enclave/home.json"); }
+  catch (e) { setStatus("Init failed: " + e.message); }
+}
+async function doHomeAddFile() {
+  const path = $("#home-add-input").value.trim();
+  if (!path) return;
+  try {
+    S.home = await post("/api/home/add", { path });
+    $("#home-add-input").value = "";
+    renderHome();
+  } catch (e) { setStatus("Add failed: " + e.message); }
+}
+async function doDestAdd() {
+  const type = $("#dest-type").value;
+  const body = { name: $("#dest-name").value.trim(), type };
+  const pathVal = $("#dest-path").value.trim();
+  if (type === "opendrive") { if (pathVal) body.folder = pathVal.startsWith("/") ? pathVal : "/" + pathVal; }
+  else if (pathVal) body.path = pathVal;
+  const url = $("#dest-url").value.trim();
+  if (url) body.url = url;
+  if (!body.name) { setStatus("Give the destination a name first."); return; }
+  try { S.home = await post("/api/home/dest/add", body); renderHome(); setStatus("Destination added: " + body.name); }
+  catch (e) { setStatus("Add destination failed: " + e.message); }
+}
+async function doOdSave() {
+  const username = $("#od-user").value.trim();
+  const password = $("#od-pass").value;
+  if (!username || !password) { setStatus("OpenDrive username and password are both needed."); return; }
+  try {
+    S.home = await post("/api/home/creds", { username, password });
+    $("#od-pass").value = "";
+    renderHome();
+    setStatus("OpenDrive credentials saved (never shown back).");
+  } catch (e) { setStatus("Save failed: " + e.message); }
+}
+async function doStowDirSave() {
+  try {
+    S.home = await post("/api/home/config", { stowDir: $("#home-stowdir").value.trim() });
+    renderHome();
+    setStatus("Stow directory saved.");
+  } catch (e) { setStatus("Save failed: " + e.message); }
+}
+
 async function doDelete() {
   const name = S.selected;
   if (!name) return;
@@ -509,14 +726,15 @@ async function doRun() {
 function switchView(view) {
   S.view = view;
   $$(".nav-item").forEach((b) => b.classList.toggle("selected", b.dataset.view === view));
-  ["scan", "vault", "console"].forEach((v) => {
+  ["scan", "vault", "console", "home"].forEach((v) => {
     $("#view-" + v).classList.toggle("hidden", v !== view);
     $("#toolbar-" + v)?.classList.toggle("hidden", v !== view);
   });
-  $("#search").style.visibility = view === "console" ? "hidden" : "visible";
+  $("#search").style.visibility = view === "console" || view === "home" ? "hidden" : "visible";
   if (view !== "vault") closeInspector();
   if (view === "vault" && S.state) setStatus(S.state.locked ? "Vault is locked" : `${S.state.entries.length} entr(ies) in the ${S.state.project} vault`, S.state.dir);
   if (view === "console") setStatus("Console — commands run in the project folder with vault secrets in the environment", S.state ? S.state.dir : "");
+  if (view === "home") { refreshHome(); setStatus("Home — backups and stow state for this machine", S.home ? S.home.home : ""); }
   if (view === "scan") renderScan();
 }
 
@@ -530,6 +748,14 @@ function init() {
   $("#btn-unstow").addEventListener("click", doUnstow);
   $("#btn-inject").addEventListener("click", doInject);
   $("#btn-clear-output").addEventListener("click", () => { $("#run-output").innerHTML = ""; });
+  $("#btn-home-refresh").addEventListener("click", refreshHome);
+  $("#btn-home-backup-all").addEventListener("click", () => doHomeBackup(null));
+  $("#btn-home-init").addEventListener("click", doHomeInit);
+  $("#btn-home-add").addEventListener("click", doHomeAddFile);
+  $("#home-add-input").addEventListener("keydown", (e) => { if (e.key === "Enter") doHomeAddFile(); });
+  $("#btn-dest-add").addEventListener("click", doDestAdd);
+  $("#btn-od-save").addEventListener("click", doOdSave);
+  $("#btn-home-stowdir").addEventListener("click", doStowDirSave);
   $("#verify-badge").addEventListener("click", async () => { await doVerify(); setStatus("Verification re-run."); });
   $("#search").addEventListener("input", () => { renderScan(); renderVault(); });
   $("#btn-lock").addEventListener("click", async () => {

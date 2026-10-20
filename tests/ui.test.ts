@@ -176,3 +176,59 @@ describe("enclave UI stow endpoints", () => {
     expect(readFileSync(slog, "utf8")).toContain("-D shell");
   });
 });
+
+describe("enclave UI home manager", () => {
+  async function getHome() {
+    const res = await fetch(base + "/api/home/state");
+    return { status: res.status, data: await res.json() };
+  }
+
+  test("config → selection → destination → backup pill → restore", async () => {
+    // fixture home files (HOME is the ui tmp home from beforeAll)
+    mkdirSync(join(home, "Documents"), { recursive: true });
+    mkdirSync(join(home, "usbdrive"), { recursive: true });
+    writeFileSync(join(home, "Documents", "notes.txt"), "home notes\n");
+
+    const s0 = await getHome();
+    expect(s0.data.configured).toBe(false);
+    expect(s0.data.rsyncAvailable).toBe(true);
+
+    const cfg = await post("/api/home/config", {});
+    expect(cfg.data.configured).toBe(true);
+
+    const bad = await post("/api/home/add", { path: "/etc/passwd" });
+    expect(bad.status).toBe(400);
+    const add = await post("/api/home/add", { path: "Documents/notes.txt" });
+    expect(add.data.files).toEqual([{ path: "Documents/notes.txt", exists: true, dir: false, size: 11 }]);
+
+    const dest = await post("/api/home/dest/add", { name: "usb", type: "path", path: join(home, "usbdrive") });
+    expect(dest.data.destinations.length).toBe(1);
+    expect(dest.data.destinations[0].lastBackup).toBeNull();
+    expect(dest.data.destinations[0].where).toBe(join(home, "usbdrive"));
+
+    const bk = await post("/api/home/backup", { dest: "usb" });
+    expect(bk.status).toBe(200);
+    expect(bk.data.results[0].rec.ok).toBe(true);
+    // the pill data: a recorded backup with counts, on the destination
+    const pill = bk.data.status.destinations[0].lastBackup;
+    expect(pill.files).toBe(1);
+    expect(typeof pill.at).toBe("string");
+    expect(readFileSync(join(home, "usbdrive", "enclave-home", "Documents", "notes.txt"), "utf8")).toBe("home notes\n");
+
+    rmSync(join(home, "Documents", "notes.txt"));
+    const rs = await post("/api/home/restore", { dest: "usb" });
+    expect(rs.status).toBe(200);
+    expect(rs.data.rec.ok).toBe(true);
+    expect(readFileSync(join(home, "Documents", "notes.txt"), "utf8")).toBe("home notes\n");
+    expect(rs.data.status.destinations[0].lastRestore.ok).toBe(true);
+  });
+
+  test("opendrive credentials save without ever being echoed", async () => {
+    const r = await post("/api/home/creds", { username: "od-person@example.com", password: "od-secret-pw" });
+    expect(r.status).toBe(200);
+    expect(r.data.opendriveConfigured).toBe(true);
+    expect(JSON.stringify(r.data)).not.toContain("od-secret-pw");
+    const s = await getHome();
+    expect(JSON.stringify(s.data)).not.toContain("od-secret-pw");
+  });
+});

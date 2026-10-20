@@ -16,6 +16,11 @@ import {
   stowPackages, unstowPackages,
 } from "./core.ts";
 import { stowAvailable } from "./stow.ts";
+import {
+  loadHomeConfig, saveHomeConfig, emptyHomeConfig, homeStatus,
+  addFiles, removeFile, addDest, removeDest, backupTo, backupAll, restoreFrom,
+  loadCredentials, saveCredentials, type DestConfig,
+} from "./home.ts";
 
 interface Session {
   dir: string;
@@ -240,6 +245,88 @@ export function startUiServer(port: number) {
             const r = unstowPackages(session.dir, session.vault!);
             persistVault();
             return json({ ...r, state: stateJson() });
+          } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+        }
+
+        /* -------- home manager (local file ops; no vault involved) -------- */
+        if (p === "/api/home/state" && req.method === "GET") {
+          return json(homeStatus(loadHomeConfig()));
+        }
+        if (p === "/api/home/config" && req.method === "POST") {
+          const b = await body(req);
+          const cfg = loadHomeConfig() || emptyHomeConfig();
+          if (typeof b.stowDir === "string") cfg.stowDir = b.stowDir || undefined;
+          if (!cfg.stowDir && existsSync(join(homedir(), "dotfiles"))) cfg.stowDir = "~/dotfiles";
+          saveHomeConfig(cfg);
+          return json(homeStatus(cfg));
+        }
+        if (p === "/api/home/add" && req.method === "POST") {
+          const b = await body(req);
+          const cfg = loadHomeConfig() || emptyHomeConfig();
+          const r = addFiles(cfg, [String(b.path || "")]);
+          if (!r.added.length && r.rejected.length) return err(`rejected (outside home or invalid): ${b.path}`);
+          saveHomeConfig(cfg);
+          return json(homeStatus(cfg));
+        }
+        if (p === "/api/home/remove" && req.method === "POST") {
+          const b = await body(req);
+          const cfg = loadHomeConfig();
+          if (!cfg) return err("no home config");
+          removeFile(cfg, String(b.path || ""));
+          saveHomeConfig(cfg);
+          return json(homeStatus(cfg));
+        }
+        if (p === "/api/home/dest/add" && req.method === "POST") {
+          const b = await body(req);
+          const cfg = loadHomeConfig() || emptyHomeConfig();
+          const dest: DestConfig = {
+            name: String(b.name || ""), type: b.type as DestConfig["type"],
+            path: typeof b.path === "string" && b.path ? b.path : undefined,
+            url: typeof b.url === "string" && b.url ? b.url : undefined,
+            folder: typeof b.folder === "string" && b.folder ? b.folder : undefined,
+            requireMount: typeof b.requireMount === "boolean" ? b.requireMount : undefined,
+          };
+          try { addDest(cfg, dest); } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+          saveHomeConfig(cfg);
+          return json(homeStatus(cfg));
+        }
+        if (p === "/api/home/dest/remove" && req.method === "POST") {
+          const b = await body(req);
+          const cfg = loadHomeConfig();
+          if (!cfg) return err("no home config");
+          removeDest(cfg, String(b.name || ""));
+          saveHomeConfig(cfg);
+          return json(homeStatus(cfg));
+        }
+        if (p === "/api/home/creds" && req.method === "POST") {
+          const b = await body(req);
+          if (!b.username || !b.password) return err("username and password are both required");
+          const creds = loadCredentials();
+          creds.opendrive = { username: String(b.username), password: String(b.password) };
+          saveCredentials(creds);
+          return json(homeStatus(loadHomeConfig()));
+        }
+        if (p === "/api/home/backup" && req.method === "POST") {
+          const cfg = loadHomeConfig();
+          if (!cfg) return err("no home config");
+          const b = await body(req);
+          try {
+            if (b.dest) {
+              const rec = await backupTo(cfg, String(b.dest), { deleteExtra: b.deleteExtra === true });
+              return json({ results: [{ name: String(b.dest), rec }], status: homeStatus(loadHomeConfig()) });
+            }
+            const results = await backupAll(cfg);
+            return json({ results, status: homeStatus(loadHomeConfig()) });
+          } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+        }
+        if (p === "/api/home/restore" && req.method === "POST") {
+          const cfg = loadHomeConfig();
+          if (!cfg) return err("no home config");
+          const b = await body(req);
+          if (!b.dest) return err("a destination is required");
+          try {
+            const rec = await restoreFrom(cfg, String(b.dest));
+            return json({ rec, status: homeStatus(loadHomeConfig()) });
           } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
         }
 

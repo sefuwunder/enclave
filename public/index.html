@@ -19,6 +19,7 @@
       <button class="nav-item selected" data-view="scan"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 L21 21"/></svg></span>Scan</button>
       <button class="nav-item" data-view="vault"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8.5 10.5v-2a3.5 3.5 0 0 1 7 0v2"/></svg></span>Vault<span class="nav-count" id="nav-vault-count"></span></button>
       <button class="nav-item" data-view="console"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6l6 6-6 6"/><path d="M13 20h6"/></svg></span>Console</button>
+      <button class="nav-item" data-view="home"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11.5 12 4l8 7.5"/><path d="M6.5 9.8V20h11V9.8"/><path d="M10.3 20v-5.2h3.4V20"/></svg></span>Home</button>
     </nav>
     <div class="side-caption">PROJECT</div>
     <div class="side-project">
@@ -49,6 +50,10 @@
       </div>
       <div class="toolbar-actions hidden" id="toolbar-console">
         <button class="tbtn" id="btn-clear-output">Clear Output</button>
+      </div>
+      <div class="toolbar-actions hidden" id="toolbar-home">
+        <button class="tbtn" id="btn-home-refresh">↻ Refresh</button>
+        <button class="tbtn primary" id="btn-home-backup-all">Back Up All</button>
       </div>
       <div class="toolbar-spacer"></div>
       <div class="verify-badge" id="verify-badge" title="Run verification">—</div>
@@ -100,6 +105,52 @@
         <button class="tbtn" id="btn-stop" disabled>Stop</button>
       </div>
       <pre id="run-output" aria-live="polite"></pre>
+    </section>
+
+    <section class="view hidden" id="view-home">
+      <div class="home-wrap">
+        <div class="empty hidden" id="home-unconfigured">
+          <div class="empty-title">Home manager is not set up</div>
+          <div class="empty-sub">Select home files and back them up with rsync to a USB drive, a mounted WebDAV share, or OpenDrive. Config lives at ~/.enclave/home.json; every backup is recorded so you can always see when — and where — the last one went.</div>
+          <button class="tbtn primary" id="btn-home-init">Create home config</button>
+        </div>
+        <div id="home-main" class="hidden">
+          <h3 class="home-h">Destinations</h3>
+          <div id="home-dests"></div>
+          <div class="dest-add">
+            <input type="text" id="dest-name" placeholder="name — e.g. usb" spellcheck="false">
+            <select id="dest-type">
+              <option value="path">USB / folder</option>
+              <option value="webdav">WebDAV mount</option>
+              <option value="opendrive">OpenDrive</option>
+            </select>
+            <input type="text" id="dest-path" placeholder="path / mount point (OpenDrive: folder, optional)" spellcheck="false">
+            <input type="text" id="dest-url" placeholder="WebDAV URL (optional)" spellcheck="false">
+            <button class="tbtn" id="btn-dest-add">Add destination</button>
+          </div>
+          <div id="home-od-creds" class="hidden">
+            <h3 class="home-h">OpenDrive credentials</h3>
+            <div class="dest-add">
+              <input type="text" id="od-user" placeholder="username" autocomplete="off" spellcheck="false">
+              <input type="password" id="od-pass" placeholder="password" autocomplete="off">
+              <button class="tbtn" id="btn-od-save">Save credentials</button>
+              <span class="home-note">Kept at ~/.enclave/credentials.json (mode 600), never shown back.</span>
+            </div>
+          </div>
+          <h3 class="home-h">Selected files</h3>
+          <div id="home-files"></div>
+          <div class="dest-add">
+            <input type="text" id="home-add-input" placeholder="home-relative path — e.g. Documents/notes" spellcheck="false">
+            <button class="tbtn" id="btn-home-add">Add</button>
+          </div>
+          <h3 class="home-h">Stow</h3>
+          <div id="home-stow"></div>
+          <div class="dest-add">
+            <input type="text" id="home-stowdir" placeholder="stow directory — e.g. ~/dotfiles" spellcheck="false">
+            <button class="tbtn" id="btn-home-stowdir">Save</button>
+          </div>
+        </div>
+      </div>
     </section>
 
     <footer id="statusbar"><span id="status-text">Ready</span><span class="status-right" id="status-right"></span></footer>

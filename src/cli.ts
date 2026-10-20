@@ -12,6 +12,7 @@
 //   enclave restore [dir]                 put sealed values back, byte-exact
 //   enclave stow   [dir] [pkg...]         restore secrets, then GNU-stow packages
 //   enclave unstow [dir] [pkg...]         GNU-stow -D packages, then seal back
+//   enclave home   <sub>                  home manager (rsync backups + history)
 //   enclave ui     [--port 3039]          macOS-style web UI (127.0.0.1)
 //
 // The vault lives OUTSIDE the tree at ~/.enclave/<project>.vault.enc
@@ -29,6 +30,12 @@ import {
   stowPackages, unstowPackages, markStowManaged,
 } from "./core.ts";
 import { stowAvailable } from "./stow.ts";
+import {
+  loadHomeConfig, saveHomeConfig, emptyHomeConfig, addFiles, removeFile,
+  addDest, removeDest, backupTo, backupAll, restoreFrom, homeStatus,
+  fmtBytes, opendriveCreds, loadCredentials, saveCredentials,
+  homeConfigPath, normalizeSelection, type DestConfig, type HomeConfig,
+} from "./home.ts";
 
 function fail(msg: string): never {
   console.error("enclave: " + msg);
@@ -96,7 +103,7 @@ async function openVault(vpath: string): Promise<{ vault: VaultData; auth: Vault
   return { vault: loadVault(vpath, auth), auth, info };
 }
 
-const BOOLEAN_FLAGS = new Set(["--apply", "--reveal", "--pgp", "--no-protection", "--stow", "--restow", "--adopt"]);
+const BOOLEAN_FLAGS = new Set(["--apply", "--reveal", "--pgp", "--no-protection", "--stow", "--restow", "--adopt", "--delete", "--require-mount", "--no-require-mount"]);
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string | boolean>();
   const positional: string[] = [];
@@ -323,6 +330,180 @@ async function cmdUnstow(positional: string[], flags: Map<string, string | boole
   console.log(`Sealed ${r.sealed} secret(s) back into ${vpath} — the tree is safe to commit.`);
 }
 
+/* ------------------------- home subcommands ------------------------- */
+
+async function promptLine(label: string): Promise<string> {
+  process.stderr.write(label);
+  return new Promise((res) => {
+    let buf = "";
+    const onData = (d: Buffer) => {
+      buf += d.toString("utf8");
+      if (buf.includes("\n")) {
+        process.stdin.off("data", onData);
+        process.stdin.pause();
+        res(buf.split("\n")[0].trim());
+      }
+    };
+    process.stdin.on("data", onData);
+    process.stdin.resume();
+  });
+}
+
+function requireHomeConfig(mutate = false): HomeConfig {
+  const cfg = loadHomeConfig();
+  if (cfg) return cfg;
+  if (!mutate) fail("no home config yet — run 'enclave home init'");
+  const fresh = emptyHomeConfig();
+  saveHomeConfig(fresh);
+  console.log(`Created ${homeConfigPath()}`);
+  return fresh;
+}
+
+function fmtWhen(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function cmdHomeStatus(): void {
+  const cfg = loadHomeConfig();
+  const st = homeStatus(cfg);
+  console.log(`Home: ${st.home}${cfg ? "" : "  (no home config — 'enclave home init')"}`);
+  console.log(`rsync: ${st.rsyncAvailable ? "available" : "NOT FOUND"} · stow: ${st.stowAvailable ? "available" : "not installed"} · OpenDrive creds: ${st.opendriveConfigured ? "set" : "not set"}`);
+  if (st.stow) {
+    const n = st.stow.packages.length, s = st.stow.packages.filter((p) => p.stowed).length;
+    console.log(`Stow: ${st.stow.dir} → ${st.stow.target} · ${s}/${n} package(s) stowed${n ? ": " + st.stow.packages.map((p) => `${p.name}${p.stowed ? " ✓" : ""}`).join(", ") : ""}`);
+  }
+  if (cfg) {
+    console.log(`\nSelection (${st.files.length}):`);
+    for (const f of st.files) {
+      console.log(`  ${f.path.padEnd(36)} ${f.exists ? (f.dir ? "(dir)" : fmtBytes(f.size ?? 0)) : "(missing)"}`);
+    }
+    console.log(`\nDestinations (${st.destinations.length}):`);
+    for (const d of st.destinations) {
+      const b = d.lastBackup;
+      const pill = !b ? "○ never backed up"
+        : !b.ok ? `✗ last backup FAILED ${fmtWhen(b.at)} — ${b.note || ""}`
+        : `● last backup ${fmtWhen(b.at)} · ${b.files} file(s) · ${fmtBytes(b.bytes)}`;
+      const mount = d.mounted === null ? "" : d.mounted ? "" : " · not mounted";
+      console.log(`  ${d.name.padEnd(14)} ${d.type.padEnd(9)} ${d.where}`);
+      console.log(`  ${"".padEnd(14)} ${pill}${mount}`);
+      if (d.lastRestore) console.log(`  ${"".padEnd(14)} last restore ${fmtWhen(d.lastRestore.at)} · ${d.lastRestore.files} file(s)${d.lastRestore.ok ? "" : " · FAILED"}`);
+    }
+  }
+}
+
+async function cmdHomeCreds(kind: string): Promise<void> {
+  if (kind !== "opendrive") fail("usage: enclave home creds opendrive");
+  if (!process.stdin.isTTY) fail("no TTY to prompt on — or set OPENDRIVE_USERNAME / OPENDRIVE_PASSWORD");
+  const username = await promptLine("OpenDrive username: ");
+  if (!username) fail("empty username");
+  const password = await promptHidden("OpenDrive password: ");
+  if (!password) fail("empty password");
+  const creds = loadCredentials();
+  creds.opendrive = { username, password };
+  saveCredentials(creds);
+  console.log("OpenDrive credentials saved to ~/.enclave/credentials.json (mode 600). They are never printed or put in the home config.");
+}
+
+async function cmdHome(positional: string[], flags: Map<string, string | boolean>): Promise<void> {
+  const sub = positional[0] || "status";
+  switch (sub) {
+    case "status": return cmdHomeStatus();
+    case "init": {
+      const cfg = loadHomeConfig() || emptyHomeConfig();
+      const sd = flags.get("--stow-dir");
+      if (typeof sd === "string") cfg.stowDir = sd;
+      saveHomeConfig(cfg);
+      console.log(`Home config: ${homeConfigPath()}`);
+      console.log(`Stow dir: ${cfg.stowDir || "(not set — pass --stow-dir ~/dotfiles)"} · ${cfg.files.length} selected file(s) · ${cfg.destinations.length} destination(s)`);
+      return;
+    }
+    case "add": {
+      const paths = positional.slice(1);
+      if (!paths.length) fail("usage: enclave home add <home-relative path...>");
+      const cfg = requireHomeConfig(true);
+      const { added, rejected } = addFiles(cfg, paths);
+      saveHomeConfig(cfg);
+      for (const a of added) console.log(`added: ${a}`);
+      for (const r of rejected) console.log(`rejected (outside home or invalid): ${r}`);
+      if (!added.length && !rejected.length) console.log("already selected — nothing changed");
+      return;
+    }
+    case "remove": {
+      const p = positional[1];
+      if (!p) fail("usage: enclave home remove <path>");
+      const cfg = requireHomeConfig();
+      if (!removeFile(cfg, p)) fail(`not in the selection: ${p}`);
+      saveHomeConfig(cfg);
+      console.log(`removed: ${normalizeSelection(p)}`);
+      return;
+    }
+    case "dest": {
+      const action = positional[1];
+      if (action === "add") {
+        const name = positional[2];
+        const type = flags.get("--type");
+        if (!name || typeof type !== "string") fail("usage: enclave home dest add <name> --type path|webdav|opendrive [--path <dir>] [--url <url>] [--folder <f>]");
+        if (type !== "path" && type !== "webdav" && type !== "opendrive") fail("--type must be path, webdav or opendrive");
+        const dest: DestConfig = { name, type };
+        if (typeof flags.get("--path") === "string") dest.path = flags.get("--path") as string;
+        if (typeof flags.get("--url") === "string") dest.url = flags.get("--url") as string;
+        if (typeof flags.get("--folder") === "string") dest.folder = flags.get("--folder") as string;
+        if (flags.get("--require-mount") === true) dest.requireMount = true;
+        if (flags.get("--no-require-mount") === true) dest.requireMount = false;
+        const cfg = requireHomeConfig(true);
+        addDest(cfg, dest);
+        saveHomeConfig(cfg);
+        console.log(`Destination '${name}' (${type}) added.`);
+        if (type === "opendrive" && !opendriveCreds()) {
+          console.log("No OpenDrive credentials yet — run 'enclave home creds opendrive' (or set OPENDRIVE_USERNAME / OPENDRIVE_PASSWORD).");
+        }
+        return;
+      }
+      if (action === "remove") {
+        const name = positional[2];
+        if (!name) fail("usage: enclave home dest remove <name>");
+        const cfg = requireHomeConfig();
+        if (!removeDest(cfg, name)) fail(`no destination named '${name}'`);
+        saveHomeConfig(cfg);
+        console.log(`Destination '${name}' removed (its history went with it).`);
+        return;
+      }
+      return fail("usage: enclave home dest add|remove");
+    }
+    case "backup": {
+      const cfg = requireHomeConfig();
+      const name = positional[1];
+      const opts = { deleteExtra: flags.get("--delete") === true };
+      if (name) {
+        const rec = await backupTo(cfg, name, opts);
+        console.log(`Backed up to ${name}: ${rec.files} file(s), ${fmtBytes(rec.bytes)}${rec.note ? " · " + rec.note : ""}`);
+        return;
+      }
+      if (!cfg.destinations.length) fail("no destinations — add one with 'enclave home dest add'");
+      const results = await backupAll(cfg, opts);
+      let failed = 0;
+      for (const r of results) {
+        if (r.rec) console.log(`  ${r.name}: ${r.rec.files} file(s), ${fmtBytes(r.rec.bytes)}${r.rec.note ? " · " + r.rec.note : ""}`);
+        else { console.log(`  ${r.name}: FAILED — ${r.error}`); failed++; }
+      }
+      if (failed) process.exit(1);
+      return;
+    }
+    case "restore": {
+      const name = positional[1];
+      if (!name) fail("usage: enclave home restore <destination>");
+      const cfg = requireHomeConfig();
+      const rec = await restoreFrom(cfg, name);
+      console.log(`Restored from ${name}: ${rec.files} file(s), ${fmtBytes(rec.bytes)}${rec.note ? " · " + rec.note : ""}`);
+      return;
+    }
+    case "creds": return cmdHomeCreds(positional[1] || "");
+    default: return fail(`unknown home command '${sub}' — try: status | init | add | remove | dest | backup | restore | creds`);
+  }
+}
+
 /* ------------------------- pgp subcommands ------------------------- */
 
 async function cmdPgpInit(flags: Map<string, string | boolean>): Promise<void> {
@@ -412,6 +593,10 @@ const USAGE = `enclave — secrets enclave manager for source trees
   enclave unstow  [dir] [pkg...] [--target <dir>]
                                         GNU-stow -D the packages, then seal secrets back
   enclave seal --stow [--target <dir>]  record the tree as a stow directory (target in manifest)
+  enclave home    status|init|add|remove|dest|backup|restore|creds
+                                        home manager: rsync backups of selected home
+                                        files to USB / WebDAV mounts / OpenDrive,
+                                        with last-backup history per destination
   enclave ui      [--port 3039]         macOS-style web UI on 127.0.0.1
   enclave seal --pgp [--recipient <fpr>]  seal into a PGP-encrypted vault instead
   enclave pgp init [--name N] [--email E] [--no-protection]
@@ -452,6 +637,7 @@ async function main(): Promise<void> {
       return cmdRun(runDir, flags, runCmd);
     }
     case "restore": return cmdRestore(dir, flags);
+    case "home": return cmdHome(positional, flags);
     case "stow": return cmdStow(positional, flags);
     case "unstow": return cmdUnstow(positional, flags);
     case "ui": return cmdUi(flags);

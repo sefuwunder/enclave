@@ -99,6 +99,7 @@ Placeholder-looking values (`your-api-key`, `changeme`, `${…}`,
 | `enclave restore [dir]` | undo a seal, byte-exact; manifest removed, vault kept |
 | `enclave stow [dir] [pkg…]` | restore secrets, then GNU-stow the packages into the target |
 | `enclave unstow [dir] [pkg…]` | GNU-stow `-D` the packages, then seal the secrets back |
+| `enclave home <sub>` | home manager: `status`, `init`, `add`, `remove`, `dest add/remove`, `backup [--delete]`, `restore`, `creds` |
 
 Blobs are never exported as env vars by `inject`/`run`.
 
@@ -136,6 +137,56 @@ Notes:
   UI shows **Stow…** / **Unstow + Seal** buttons in the Vault toolbar
   for stow-managed trees when stow is on the machine.
 
+## Home manager
+
+`enclave home` looks after the whole home directory: it inherits the
+stow view of your dotfiles and adds rsync backups of *selected* home
+files to USB drives, WebDAV shares and OpenDrive — with a recorded
+history per destination, so "when did I last back up, and where to?"
+always has an answer.
+
+```sh
+enclave home init --stow-dir ~/dotfiles
+enclave home add Documents .config/app Pictures/wallpapers
+enclave home dest add usb --type path --path /media/you/BackupDrive
+enclave home dest add dav --type webdav --path ~/mnt/dav --url https://dav.example.com/home
+enclave home dest add od  --type opendrive --folder /EnclaveHome
+enclave home creds opendrive          # once; stored mode 600, never printed
+enclave home backup                   # all destinations (or: backup usb)
+enclave home backup usb --delete      # also prune files gone from the selection
+enclave home restore usb
+enclave home status                   # the pills, as text
+```
+
+How it works:
+
+- Config is `~/.enclave/home.json` (mode 600). Selections are
+  home-relative paths (files or folders); paths outside the home are
+  refused. Backups are plain mirrors into an `enclave-home/` folder on
+  the destination — readable without enclave, not encrypted (the vault
+  is for secrets in trees; backups are for losing the machine).
+- USB/folder destinations rsync directly. **WebDAV destinations rsync
+  to the share's local mount point** — mount the share first (davfs2,
+  GNOME Files, …); enclave checks the mount is real and refuses to
+  silently back up onto the local disk when it isn't. Folder
+  destinations can opt into the same guard (`--require-mount`).
+- OpenDrive destinations use the OpenDrive REST API (the same
+  session/chunked-upload flow as folio): uploads skip files whose size
+  and hash already match the remote copy. Credentials come from
+  `OPENDRIVE_USERNAME` / `OPENDRIVE_PASSWORD` or
+  `~/.enclave/credentials.json` (`enclave home creds opendrive`) —
+  never the config, never the tree, never printed.
+- Every backup/restore is recorded per destination (time, file count,
+  bytes, failures with the reason). The web UI's **Home** view renders
+  that history as pills on each destination card — *● Backed up 3h ago
+  → /media/you/BackupDrive*, *○ No backups yet*, *⚠ Not mounted* — plus
+  a pill per stow package (stowed / not stowed), the selection editor,
+  and per-destination Back up / Restore buttons.
+- Missing selected files are skipped and reported, never fatal.
+  `--delete` prunes the destination's `enclave-home/` folder to
+  exactly the current selection (enclave prunes itself — rsync's
+  `--delete` doesn't reach files outside a source's subtree).
+
 ## Web UI
 
 ```sh
@@ -156,6 +207,10 @@ everything the CLI does — no decorative chrome, every control works:
   warning spelled out), Write .env.local, Restore….
 - **Console**: run any command in the project folder with the vault's
   secrets in its environment; output streams live, Stop kills it.
+- **Home**: the home manager — destination cards with last-backup
+  pills (when + where), mount state, per-destination Back up /
+  Restore, the selection editor, OpenDrive credentials, and stow
+  package status with a jump to the dotfiles project.
 
 Light/dark follows the system. The server binds 127.0.0.1 only and the
 vault file format is identical to the CLI's — seal in one, open in the
