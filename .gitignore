@@ -1,0 +1,4 @@
+node_modules/
+*.vault.enc
+.env.local
+enclave.manifest.json
