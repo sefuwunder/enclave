@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Enclave</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect x='18' y='42' width='64' height='44' rx='9' fill='%230071e3'/><path d='M34 42v-8a16 16 0 0 1 32 0v8' fill='none' stroke='%230071e3' stroke-width='9'/><circle cx='50' cy='62' r='7' fill='white'/><rect x='47' y='62' width='6' height='13' rx='3' fill='white'/></svg>">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="side-brand">
+      <svg width="22" height="22" viewBox="0 0 100 100" aria-hidden="true"><rect x="18" y="42" width="64" height="44" rx="9" fill="currentColor" opacity=".9"/><path d="M34 42v-8a16 16 0 0 1 32 0v8" fill="none" stroke="currentColor" stroke-width="9"/><circle cx="50" cy="62" r="7" fill="var(--sidebar-bg)"/><rect x="47" y="62" width="6" height="13" rx="3" fill="var(--sidebar-bg)"/></svg>
+      <span>Enclave</span>
+    </div>
+    <div class="side-caption">VIEWS</div>
+    <nav id="nav">
+      <button class="nav-item selected" data-view="scan"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 L21 21"/></svg></span>Scan</button>
+      <button class="nav-item" data-view="vault"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="5" y="10.5" width="14" height="9.5" rx="2"/><path d="M8.5 10.5v-2a3.5 3.5 0 0 1 7 0v2"/></svg></span>Vault<span class="nav-count" id="nav-vault-count"></span></button>
+      <button class="nav-item" data-view="console"><span class="nav-glyph"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6l6 6-6 6"/><path d="M13 20h6"/></svg></span>Console</button>
+    </nav>
+    <div class="side-caption">PROJECT</div>
+    <div class="side-project">
+      <div class="side-proj-name" id="proj-name">—</div>
+      <div class="side-proj-path" id="proj-path">—</div>
+      <button class="side-btn" id="btn-change-project">Change…</button>
+    </div>
+    <div class="side-caption">VAULT</div>
+    <div class="side-project">
+      <div class="side-vault-state" id="vault-state">—</div>
+      <div class="side-proj-path" id="vault-path">—</div>
+      <button class="side-btn" id="btn-lock">Unlock…</button>
+    </div>
+    <div class="side-foot">Vault lives outside the tree.<br>Passphrase is kept in memory only.</div>
+  </aside>
+
+  <main id="main">
+    <header id="toolbar">
+      <div class="toolbar-actions" id="toolbar-scan">
+        <button class="tbtn" id="btn-rescan">↻ Rescan</button>
+        <button class="tbtn primary" id="btn-seal">Seal…</button>
+      </div>
+      <div class="toolbar-actions hidden" id="toolbar-vault">
+        <button class="tbtn" id="btn-inject">Write .env.local</button>
+        <button class="tbtn" id="btn-restore">Restore…</button>
+      </div>
+      <div class="toolbar-actions hidden" id="toolbar-console">
+        <button class="tbtn" id="btn-clear-output">Clear Output</button>
+      </div>
+      <div class="toolbar-spacer"></div>
+      <div class="verify-badge" id="verify-badge" title="Run verification">—</div>
+      <input type="search" id="search" placeholder="Filter" aria-label="Filter">
+    </header>
+
+    <section class="view" id="view-scan">
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th data-sort="file">File</th><th data-sort="line">Line</th>
+            <th data-sort="kind">Kind</th><th data-sort="keyName">Name</th><th>Value</th>
+          </tr></thead>
+          <tbody id="scan-body"></tbody>
+        </table>
+        <div class="empty hidden" id="scan-empty">
+          <div class="empty-title">No secrets found</div>
+          <div class="empty-sub">This tree is clean. Rescan after editing files to check again.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view hidden" id="view-vault">
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th data-sort="name">Name</th><th data-sort="kind">Kind</th>
+            <th data-sort="file">Source</th><th data-sort="sealedAt">Sealed</th><th>Value</th>
+          </tr></thead>
+          <tbody id="vault-body"></tbody>
+        </table>
+        <div class="empty hidden" id="vault-empty">
+          <div class="empty-title">Vault is empty</div>
+          <div class="empty-sub">Seal findings from the Scan view and they will appear here.</div>
+        </div>
+        <div class="empty hidden" id="vault-locked">
+          <div class="empty-title">Vault is locked</div>
+          <div class="empty-sub">Unlock to browse the entries sealed for this project.</div>
+          <button class="tbtn primary" id="btn-unlock-2">Unlock…</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="view hidden" id="view-console">
+      <div class="console-bar">
+        <span class="console-prompt">❯</span>
+        <input type="text" id="run-input" placeholder="command to run with vault secrets in its environment — e.g. bun run dev" spellcheck="false">
+        <button class="tbtn primary" id="btn-run">Run</button>
+        <button class="tbtn" id="btn-stop" disabled>Stop</button>
+      </div>
+      <pre id="run-output" aria-live="polite"></pre>
+    </section>
+
+    <footer id="statusbar"><span id="status-text">Ready</span><span class="status-right" id="status-right"></span></footer>
+  </main>
+
+  <aside id="inspector" class="hidden">
+    <div class="insp-caption">INSPECTOR</div>
+    <div class="insp-name" id="insp-name">—</div>
+    <dl class="insp-fields">
+      <dt>Kind</dt><dd id="insp-kind">—</dd>
+      <dt>Source</dt><dd id="insp-file">—</dd>
+      <dt>Sealed</dt><dd id="insp-sealed">—</dd>
+      <dt id="insp-meta-label" class="hidden">Detected</dt><dd id="insp-meta" class="hidden">—</dd>
+      <dt id="insp-sha-label" class="hidden">SHA-256</dt><dd id="insp-sha" class="hidden mono">—</dd>
+      <dt>Value</dt><dd id="insp-value" class="mono">—</dd>
+    </dl>
+    <div class="insp-actions">
+      <button class="tbtn" id="btn-reveal">Reveal</button>
+      <button class="tbtn" id="btn-copy">Copy</button>
+      <button class="tbtn hidden" id="btn-extract">Extract…</button>
+      <button class="tbtn danger" id="btn-delete">Delete…</button>
+    </div>
+    <div class="insp-note" id="insp-note"></div>
+  </aside>
+</div>
+
+<div id="sheet-backdrop" class="hidden">
+  <!-- unlock sheet -->
+  <div class="sheet hidden" id="sheet-unlock">
+    <div class="sheet-title" id="unlock-title">Unlock Vault</div>
+    <div class="sheet-msg" id="unlock-msg">Enter the vault passphrase. It stays in this server's memory until you lock.</div>
+    <input type="password" id="unlock-pass" placeholder="Passphrase" autocomplete="current-password">
+    <div class="sheet-error hidden" id="unlock-error"></div>
+    <div class="sheet-buttons">
+      <button class="tbtn" data-close>Cancel</button>
+      <button class="tbtn primary" id="btn-do-unlock">Unlock</button>
+    </div>
+  </div>
+  <!-- generic confirm sheet -->
+  <div class="sheet hidden" id="sheet-confirm">
+    <div class="sheet-title" id="confirm-title">Confirm</div>
+    <div class="sheet-msg" id="confirm-msg"></div>
+    <div class="sheet-buttons">
+      <button class="tbtn" data-close>Cancel</button>
+      <button class="tbtn primary" id="btn-do-confirm">OK</button>
+    </div>
+  </div>
+  <!-- project sheet -->
+  <div class="sheet hidden wide" id="sheet-project">
+    <div class="sheet-title">Choose Project Folder</div>
+    <input type="text" id="proj-input" spellcheck="false" aria-label="Project path">
+    <div class="browse-list" id="browse-list"></div>
+    <div class="sheet-buttons">
+      <button class="tbtn" id="btn-browse-up">↑ Up</button>
+      <span class="toolbar-spacer"></span>
+      <button class="tbtn" data-close>Cancel</button>
+      <button class="tbtn primary" id="btn-do-project">Open Project</button>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

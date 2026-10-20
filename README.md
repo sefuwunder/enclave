@@ -87,6 +87,31 @@ Placeholder-looking values (`your-api-key`, `changeme`, `${…}`,
 
 Blobs are never exported as env vars by `inject`/`run`.
 
+## Web UI
+
+```sh
+enclave ui              # http://127.0.0.1:3039 (--port N to change)
+```
+
+A macOS-style three-pane app (Keychain Access is the model) for
+everything the CLI does — no decorative chrome, every control works:
+
+- **Sidebar**: views (Scan / Vault / Console), the current project
+  (folder picker with a real directory browser), vault state and
+  lock/unlock. The passphrase is held in the server's memory only;
+  Lock wipes it.
+- **Scan**: findings table (sortable, filterable), live verify badge,
+  Seal… with a confirmation sheet naming the count and vault path.
+- **Vault**: entries with an inspector — Reveal/Hide, Copy (clipboard),
+  Extract… (blob download, sha-checked), Delete… (with the drift
+  warning spelled out), Write .env.local, Restore….
+- **Console**: run any command in the project folder with the vault's
+  secrets in its environment; output streams live, Stop kills it.
+
+Light/dark follows the system. The server binds 127.0.0.1 only and the
+vault file format is identical to the CLI's — seal in one, open in the
+other.
+
 ## Notes & limits
 
 - Blob size cap is 25 MB per file; the vault grows ~1.4× the blob

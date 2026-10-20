@@ -1,0 +1,130 @@
+// UI server integration tests — real HTTP against startUiServer on an
+// ephemeral port, driving the whole flow the browser would.
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { startUiServer } from "../src/server.ts";
+
+let server: ReturnType<typeof startUiServer>;
+let base: string;
+let root: string;   // fixture project
+let home: string;   // redirected HOME so the vault lands in tmp
+const envOrig = "API_KEY=ui-test-secret-123\nPORT=3000\n";
+let photo: Buffer;
+
+async function post(path: string, body: Record<string, unknown> = {}) {
+  const res = await fetch(base + path, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  return { status: res.status, data: await res.json().catch(() => ({})) };
+}
+async function get(path: string) {
+  const res = await fetch(base + path);
+  return { status: res.status, text: await res.text() };
+}
+
+beforeAll(() => {
+  home = mkdtempSync(join(tmpdir(), "enclave-ui-home-"));
+  process.env.HOME = home;
+  root = mkdtempSync(join(tmpdir(), "enclave-ui-proj-"));
+  writeFileSync(join(root, ".env"), envOrig);
+  // tiny EXIF jpeg (Make only)
+  const tiff = Buffer.alloc(64);
+  tiff.write("II", 0, "latin1"); tiff.writeUInt16LE(42, 2); tiff.writeUInt32LE(8, 4);
+  tiff.writeUInt16LE(1, 8);
+  tiff.writeUInt16LE(0x010f, 10); tiff.writeUInt16LE(2, 12); tiff.writeUInt32LE(6, 14); tiff.writeUInt32LE(26, 18);
+  tiff.writeUInt32LE(0, 22);
+  tiff.write("Canon\0", 26, "latin1");
+  const app1 = Buffer.concat([Buffer.from("Exif\0\0", "latin1"), tiff]);
+  const len = Buffer.alloc(2); len.writeUInt16BE(app1.length + 2, 0);
+  photo = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe1]), len, app1, Buffer.from([0xff, 0xd9])]);
+  writeFileSync(join(root, "photo.jpg"), photo);
+  server = startUiServer(0);
+  base = `http://127.0.0.1:${server.port}`;
+});
+afterAll(() => {
+  server.stop(true);
+  rmSync(root, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+describe("enclave UI server", () => {
+  test("static assets serve", async () => {
+    const idx = await get("/");
+    expect(idx.status).toBe(200);
+    expect(idx.text).toContain("Enclave");
+    expect((await get("/styles.css")).status).toBe(200);
+    expect((await get("/app.js")).status).toBe(200);
+  });
+
+  test("project + scan without unlock", async () => {
+    const p = await post("/api/project", { dir: root });
+    expect(p.status).toBe(200);
+    expect(p.data.locked).toBe(true);
+    const s = await post("/api/scan");
+    const kinds = s.data.findings.map((f: { kind: string }) => f.kind);
+    expect(kinds).toContain("env");
+    expect(kinds).toContain("blob:photo-exif");
+    expect(JSON.stringify(s.data)).not.toContain("ui-test-secret-123");
+  });
+
+  test("seal is refused while locked", async () => {
+    expect((await post("/api/seal")).status).toBe(401);
+    expect((await post("/api/reveal", { name: "API_KEY" })).status).toBe(401);
+  });
+
+  test("unlock with wrong-then-right passphrase flow", async () => {
+    const u = await post("/api/unlock", { passphrase: "ui-pass-1" });
+    expect(u.status).toBe(200);
+    expect(u.data.vaultIsNew).toBe(true);
+    expect(u.data.locked).toBe(false);
+  });
+
+  test("seal via API encrypts and masks state", async () => {
+    const r = await post("/api/seal");
+    expect(r.status).toBe(200);
+    expect(r.sealed ?? r.data.sealed).toBeGreaterThanOrEqual(2);
+    const st = await get("/api/state").then((x) => JSON.parse(x.text));
+    expect(st.entries.length).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(st)).not.toContain("ui-test-secret-123");
+    expect(existsSync(join(home, ".enclave"))).toBe(true);
+    expect(readFileSync(join(root, ".env"), "utf8")).toContain("enclave:API_KEY");
+    expect((await post("/api/verify")).data.ok).toBe(true);
+  });
+
+  test("reveal, inject, run, extract", async () => {
+    const rev = await post("/api/reveal", { name: "API_KEY" });
+    expect(rev.data.value).toBe("ui-test-secret-123");
+    const inj = await post("/api/inject");
+    expect(inj.data.count).toBeGreaterThanOrEqual(1);
+    expect(readFileSync(join(root, ".env.local"), "utf8")).toContain("API_KEY='ui-test-secret-123'");
+
+    const res = await fetch(base + "/api/run", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cmd: 'test -n "$API_KEY" && echo ENV_OK' }),
+    });
+    const sse = await res.text();
+    expect(sse).toContain("ENV_OK");
+    expect(sse).toContain('"type":"exit"');
+
+    const ext = await fetch(base + "/api/extract?name=PHOTO_PHOTO_EXIF");
+    expect(ext.status).toBe(200);
+    const bytes = Buffer.from(await ext.arrayBuffer());
+    expect(bytes.equals(photo)).toBe(true);
+  });
+
+  test("delete + lock + restore", async () => {
+    const entries0 = (await get("/api/state").then((x) => JSON.parse(x.text))).entries.length;
+    const del = await post("/api/delete", { name: "PHOTO_PHOTO_EXIF" });
+    expect(del.data.state.entries.length).toBe(entries0 - 1);
+    await post("/api/lock");
+    expect((await post("/api/reveal", { name: "API_KEY" })).status).toBe(401);
+    // wrong passphrase against the real vault now fails
+    expect((await post("/api/unlock", { passphrase: "nope" })).status).toBe(401);
+    expect((await post("/api/unlock", { passphrase: "ui-pass-1" })).status).toBe(200);
+    const rst = await post("/api/restore");
+    expect(rst.data.restored).toBeGreaterThanOrEqual(1);
+    expect(readFileSync(join(root, ".env"), "utf8")).toBe(envOrig);
+  });
+});
