@@ -1,0 +1,1 @@
+{"bin":{"enclave":"./src/cli.ts"},"description":"Secrets enclave manager for source trees: scan, seal into an encrypted vault, inject at run time.","name":"enclave","scripts":{"start":"bun run src/cli.ts","test":"bun test"},"type":"module","version":"1.0.0"}
