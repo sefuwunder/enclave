@@ -218,6 +218,15 @@ tr.selected .kind-chip { background: rgba(255,255,255,.25); }
 }
 .sheet input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(0,113,227,.25); }
 .sheet-error { color: var(--danger); font-size: 12px; margin: -4px 0 10px; }
+.seg { display: flex; border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden; margin-bottom: 12px; }
+.seg-btn { flex: 1; padding: 5px 0; border: 0; background: transparent; cursor: pointer; color: var(--text-2); }
+.seg-btn.selected { background: var(--field-bg); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
+.seg-btn:disabled { opacity: .45; cursor: default; }
+.sheet select {
+  width: 100%; padding: 7px 10px; border-radius: 7px; margin-bottom: 8px;
+  border: 1px solid var(--hairline); background: var(--field-bg); color: var(--text); outline: none;
+}
+.sheet-note { font-size: 12px; color: var(--text-2); margin-bottom: 12px; line-height: 1.5; }
 .shake { animation: shake 0.3s; }
 @keyframes shake { 25% { transform: translateX(-6px); } 75% { transform: translateX(6px); } }
 .sheet-buttons { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }

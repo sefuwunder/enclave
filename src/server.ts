@@ -8,7 +8,8 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { join, resolve, basename, dirname } from "node:path";
 import { homedir } from "node:os";
 import { scanTree, mask } from "./scan.ts";
-import { loadVault, saveVault, vaultExists, emptyVault, type VaultData } from "./vault.ts";
+import { loadVault, saveVault, vaultExists, emptyVault, inspectVaultFile, type VaultData, type VaultAuth } from "./vault.ts";
+import { pgpAvailable, listAllKeys, generateKey, loadConfig, saveConfig } from "./pgp.ts";
 import {
   projectOf, defaultVaultPath, loadManifest, sealTree, verifyTree,
   restoreTree, envEntries, injectEnvFile, extractBlobBytes,
@@ -17,10 +18,10 @@ import {
 interface Session {
   dir: string;
   vault: VaultData | null;
-  passphrase: string | null;
+  auth: VaultAuth | null;   // passphrase, or PGP recipient+keyring (+key passphrase)
   vaultIsNew: boolean;
 }
-const session: Session = { dir: process.cwd(), vault: null, passphrase: null, vaultIsNew: false };
+const session: Session = { dir: process.cwd(), vault: null, auth: null, vaultIsNew: false };
 let runningProc: ReturnType<typeof Bun.spawn> | null = null;
 
 function vaultPath(): string { return defaultVaultPath(session.dir); }
@@ -36,13 +37,23 @@ function publicEntry(e: VaultData["entries"][number]) {
 
 function stateJson() {
   const manifest = loadManifest(session.dir);
+  const vp = vaultPath();
+  let scheme: string = session.auth?.recipient ? "pgp" : "passphrase";
+  let pgpRecipient: string | null = session.auth?.recipient ?? null;
+  if (vaultExists(vp)) {
+    const info = inspectVaultFile(vp);
+    scheme = info.scheme;
+    pgpRecipient = info.recipient ?? null;
+  }
   return {
     locked: session.vault === null,
     dir: session.dir,
     project: projectOf(session.dir),
-    vaultPath: vaultPath(),
-    vaultExists: vaultExists(vaultPath()),
+    vaultPath: vp,
+    vaultExists: vaultExists(vp),
     vaultIsNew: session.vaultIsNew,
+    vaultScheme: scheme,
+    pgpRecipient,
     manifest: manifest ? { entries: manifest.entries } : null,
     entries: session.vault ? session.vault.entries.map(publicEntry) : [],
   };
@@ -63,13 +74,13 @@ async function body(req: Request): Promise<Record<string, unknown>> {
 }
 
 function requireUnlocked(): Response | null {
-  if (!session.vault || !session.passphrase) return err("vault is locked", 401);
+  if (!session.vault || !session.auth) return err("vault is locked", 401);
   return null;
 }
 
 function persistVault(): void {
-  if (session.vault && session.passphrase) {
-    saveVault(vaultPath(), session.vault, session.passphrase);
+  if (session.vault && session.auth) {
+    saveVault(vaultPath(), session.vault, session.auth);
     session.vaultIsNew = false;
   }
 }
@@ -105,7 +116,7 @@ export function startUiServer(port: number) {
           const b = await body(req);
           const dir = resolve(String(b.dir || ""));
           if (!existsSync(dir) || !statSync(dir).isDirectory()) return err(`not a directory: ${dir}`);
-          if (dir !== session.dir) { session.vault = null; session.passphrase = null; session.vaultIsNew = false; }
+          if (dir !== session.dir) { session.vault = null; session.auth = null; session.vaultIsNew = false; }
           session.dir = dir;
           return json(stateJson());
         }
@@ -139,24 +150,57 @@ export function startUiServer(port: number) {
         if (p === "/api/unlock" && req.method === "POST") {
           const b = await body(req);
           const pass = String(b.passphrase || "");
-          if (!pass) return err("empty passphrase");
           const vp = vaultPath();
           if (vaultExists(vp)) {
-            try { session.vault = loadVault(vp, pass); }
-            catch { return err("wrong passphrase (or vault is corrupt)", 401); }
-            session.passphrase = pass;
+            const info = inspectVaultFile(vp);
+            const auth: VaultAuth = info.scheme === "pgp"
+              ? { passphrase: pass === "" ? undefined : pass, recipient: info.recipient, keyring: info.keyring }
+              : { passphrase: pass };
+            if (info.scheme === "passphrase" && !pass) return err("empty passphrase");
+            try { session.vault = loadVault(vp, auth); }
+            catch (e) { return err(info.scheme === "pgp" ? "could not decrypt with that key/passphrase" : "wrong passphrase (or vault is corrupt)", 401); }
+            session.auth = auth;
             session.vaultIsNew = false;
-          } else {
+          } else if (b.scheme === "pgp") {
+            const recipient = String(b.recipient || "");
+            const keyring = b.keyring === "system" ? "system" : "dedicated";
+            if (!recipient) return err("choose a PGP recipient");
             session.vault = emptyVault(projectOf(session.dir));
-            session.passphrase = pass;
+            session.auth = { recipient, keyring };
+            session.vaultIsNew = true;
+          } else {
+            if (!pass) return err("empty passphrase");
+            session.vault = emptyVault(projectOf(session.dir));
+            session.auth = { passphrase: pass };
             session.vaultIsNew = true;
           }
           return json(stateJson());
         }
 
         if (p === "/api/lock" && req.method === "POST") {
-          session.vault = null; session.passphrase = null; session.vaultIsNew = false;
+          session.vault = null; session.auth = null; session.vaultIsNew = false;
           return json(stateJson());
+        }
+
+        if (p === "/api/pgp/keys" && req.method === "GET") {
+          const cfg = loadConfig();
+          return json({
+            available: pgpAvailable(),
+            keys: pgpAvailable() ? listAllKeys() : [],
+            defaultRecipient: cfg.pgpRecipient ?? null,
+          });
+        }
+
+        if (p === "/api/pgp/init" && req.method === "POST") {
+          if (!pgpAvailable()) return err("gpg is not available on this system");
+          const b = await body(req);
+          const key = generateKey({
+            name: String(b.name || "Enclave Vault"),
+            email: String(b.email || "enclave@localhost"),
+            passphrase: b.noProtection === true ? undefined : String(b.passphrase || ""),
+          });
+          saveConfig({ pgpRecipient: key.fingerprint, pgpKeyring: "dedicated" });
+          return json({ key });
         }
 
         if (p === "/api/seal" && req.method === "POST") {

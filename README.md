@@ -112,6 +112,36 @@ Light/dark follows the system. The server binds 127.0.0.1 only and the
 vault file format is identical to the CLI's — seal in one, open in the
 other.
 
+## PGP vaults
+
+By default a vault is passphrase-encrypted (scrypt + AES-256-GCM).
+It can instead be **OpenPGP-encrypted to a key** — seal with the
+public key, open with the private key, using the system `gpg`. The
+vault file stays one JSON envelope; the scheme, recipient fingerprint
+and keyring are recorded in the clear so tools know what to ask for.
+The encrypted payload is a standard OpenPGP message (extract `data`,
+base64-decode, `gpg -d`) — no lock-in.
+
+```sh
+enclave pgp init                    # create a dedicated key in ~/.enclave/gnupg
+enclave pgp list                      # keys in the dedicated + your system keyring
+enclave pgp use <fingerprint|uid>     # seal to one of YOUR existing keys
+enclave seal --pgp --apply            # new vault, PGP scheme
+enclave pgp convert                   # re-encrypt a vault to the other scheme
+```
+
+Two keyrings are kept apart: your own (default GNUPGHOME — enclave
+never writes to it except reading public keys and decrypting) and a
+dedicated one at `~/.enclave/gnupg` for keys enclave creates. The
+dedicated keyring ships a `gpg-agent.conf` with cache TTL 0: a
+protected vault key asks for its passphrase every time, like the
+passphrase scheme. Keys are Ed25519/Cv25519. Opening a PGP vault
+takes the key's passphrase via `ENCLAVE_PASSPHRASE` or the prompt —
+for unprotected keys, or keys your gpg-agent already holds, blank
+works. `pgp convert` needs the old scheme's credential and the new
+one; the UI opens both schemes transparently, and new vaults can be
+created as PGP from the unlock sheet.
+
 ## Notes & limits
 
 - Blob size cap is 25 MB per file; the vault grows ~1.4× the blob

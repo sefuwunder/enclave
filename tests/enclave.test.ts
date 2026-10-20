@@ -4,7 +4,7 @@ import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { encryptVault, decryptVault, emptyVault, type VaultData } from "../src/vault.ts";
+import { encryptVaultPassphrase, decryptPassphrase, emptyVault, type VaultData } from "../src/vault.ts";
 import { scanTextContent, scanEnvContent, scanTree, scanBlob, shannonEntropy, isPlaceholder } from "../src/scan.ts";
 
 describe("vault crypto", () => {
@@ -13,24 +13,24 @@ describe("vault crypto", () => {
     entries: [{ name: "API_KEY", value: "super-secret-value", file: ".env", kind: "env", sealedAt: new Date().toISOString() }],
   };
   test("roundtrip", () => {
-    const enc = encryptVault(data, "hunter2");
-    const dec = decryptVault(enc, "hunter2");
+    const enc = encryptVaultPassphrase(data, "hunter2");
+    const dec = decryptPassphrase(enc, "hunter2");
     expect(dec.entries[0].value).toBe("super-secret-value");
   });
   test("ciphertext contains no plaintext", () => {
-    const enc = encryptVault(data, "hunter2");
+    const enc = encryptVaultPassphrase(data, "hunter2");
     expect(JSON.stringify(enc)).not.toContain("super-secret");
   });
   test("wrong passphrase throws", () => {
-    const enc = encryptVault(data, "hunter2");
-    expect(() => decryptVault(enc, "wrong")).toThrow();
+    const enc = encryptVaultPassphrase(data, "hunter2");
+    expect(() => decryptPassphrase(enc, "wrong")).toThrow();
   });
   test("tampered ciphertext throws", () => {
-    const enc = encryptVault(data, "hunter2");
+    const enc = encryptVaultPassphrase(data, "hunter2");
     const raw = Buffer.from(enc.data, "base64");
     raw[0] = raw[0] ^ 0xff;
     enc.data = raw.toString("base64");
-    expect(() => decryptVault(enc, "hunter2")).toThrow();
+    expect(() => decryptPassphrase(enc, "hunter2")).toThrow();
   });
   test("empty vault", () => {
     const v = emptyVault("x");

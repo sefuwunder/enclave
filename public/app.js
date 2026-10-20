@@ -62,10 +62,14 @@ function renderState() {
   const lockBtn = $("#btn-lock");
   if (st.locked) {
     $("#vault-state").textContent = st.vaultExists ? "Locked" : "No vault yet";
-    lockBtn.textContent = st.vaultExists ? "Unlock…" : "Set Passphrase…";
+    lockBtn.textContent = st.vaultExists ? "Unlock…" : "Create Vault…";
   } else {
     $("#vault-state").textContent = st.vaultIsNew ? "Unlocked (new — seals on first Seal)" : "Unlocked";
     lockBtn.textContent = "Lock";
+  }
+  if (st.vaultScheme === "pgp") {
+    $("#vault-state").textContent += " · PGP";
+    if (st.pgpRecipient) $("#vault-path").textContent = st.vaultPath + "\n→ " + st.pgpRecipient.slice(-16);
   }
   renderVault();
 }
@@ -281,11 +285,56 @@ async function doDelete() {
 }
 
 /* ---------------- unlock / lock ---------------- */
+let unlockScheme = "passphrase";
+let keysLoaded = false;
+function setSeg(scheme) {
+  unlockScheme = scheme;
+  $("#seg-pass").classList.toggle("selected", scheme === "passphrase");
+  $("#seg-pgp").classList.toggle("selected", scheme === "pgp");
+  $("#unlock-pgp-picker").classList.toggle("hidden", scheme !== "pgp");
+  if (scheme === "pgp" && !keysLoaded) loadKeys();
+}
+async function loadKeys() {
+  try {
+    const r = await api("/api/pgp/keys");
+    const sel = $("#unlock-key");
+    sel.innerHTML = "";
+    if (!r.available) {
+      $("#seg-pgp").disabled = true;
+      $("#seg-pgp").textContent = "PGP Key (no gpg)";
+      return;
+    }
+    for (const k of r.keys) {
+      const opt = document.createElement("option");
+      opt.value = k.fingerprint;
+      opt.dataset.keyring = k.keyring;
+      opt.textContent = `${k.uid} — …${k.fingerprint.slice(-8)} (${k.keyring}${k.hasSecret ? ", secret ✓" : ", public only"})`;
+      if (k.fingerprint === r.defaultRecipient) opt.selected = true;
+      sel.appendChild(opt);
+    }
+    const gen = document.createElement("option");
+    gen.value = "__generate";
+    gen.textContent = "Generate a new enclave key…";
+    sel.appendChild(gen);
+    keysLoaded = true;
+  } catch { /* leave picker empty; seal will surface errors */ }
+}
 function openUnlock(msg) {
   const st = S.state;
-  $("#unlock-title").textContent = st && !st.vaultExists ? "Set Vault Passphrase" : "Unlock Vault";
-  $("#btn-do-unlock").textContent = st && !st.vaultExists ? "Set Passphrase" : "Unlock";
-  if (msg) $("#unlock-msg").textContent = msg;
+  const creating = !(st && st.vaultExists);
+  const isPgp = st && st.vaultScheme === "pgp" && st.vaultExists;
+  $("#unlock-title").textContent = isPgp ? "Unlock PGP Vault" : creating ? "Create Vault" : "Unlock Vault";
+  $("#btn-do-unlock").textContent = creating ? "Create" : "Unlock";
+  $("#unlock-pgp").classList.toggle("hidden", !creating);
+  if (creating) setSeg("passphrase");
+  if (isPgp) {
+    $("#unlock-msg").textContent = `This vault is OpenPGP-encrypted to …${(st.pgpRecipient || "").slice(-8)}. Enter the key's passphrase — leave blank for an unprotected key or your GPG agent.`;
+    $("#unlock-pass").placeholder = "PGP key passphrase (may be blank)";
+  } else {
+    $("#unlock-pass").placeholder = "Passphrase";
+    if (msg) $("#unlock-msg").textContent = msg;
+    else if (creating) $("#unlock-msg").textContent = "Choose how this project's vault is protected. The passphrase (or key) is kept in this server's memory only until you lock.";
+  }
   $("#unlock-error").classList.add("hidden");
   $("#unlock-pass").value = "";
   openSheet("#sheet-unlock");
@@ -293,14 +342,34 @@ function openUnlock(msg) {
 }
 async function doUnlock() {
   const pass = $("#unlock-pass").value;
+  const body = { passphrase: pass };
   try {
-    S.state = await post("/api/unlock", { passphrase: pass });
+    if (S.state && !S.state.vaultExists && unlockScheme === "pgp") {
+      const sel = $("#unlock-key");
+      if (sel.value === "__generate") {
+        const r = await post("/api/pgp/init", {
+          name: "Enclave Vault",
+          email: "enclave@" + S.state.project + ".local",
+          passphrase: pass,
+        });
+        body.scheme = "pgp";
+        body.recipient = r.key.fingerprint;
+        body.keyring = "dedicated";
+      } else if (sel.value) {
+        body.scheme = "pgp";
+        body.recipient = sel.value;
+        body.keyring = sel.selectedOptions[0].dataset.keyring || "dedicated";
+      } else {
+        throw new Error("no PGP key selected");
+      }
+    }
+    S.state = await post("/api/unlock", body);
     $("#unlock-pass").value = "";
     closeSheets();
     renderState();
     await doScan(true);
     await doVerify();
-    setStatus(S.state.vaultIsNew ? "Vault passphrase set — first Seal creates the vault." : "Vault unlocked.");
+    setStatus(S.state.vaultIsNew ? "Vault created — first Seal encrypts into it." : "Vault unlocked.");
   } catch (e) {
     const errEl = $("#unlock-error");
     errEl.textContent = e.message;
@@ -427,6 +496,8 @@ function init() {
   });
   $("#btn-unlock-2").addEventListener("click", () => openUnlock());
   $("#btn-do-unlock").addEventListener("click", doUnlock);
+  $("#seg-pass").addEventListener("click", () => setSeg("passphrase"));
+  $("#seg-pgp").addEventListener("click", () => setSeg("pgp"));
   $("#unlock-pass").addEventListener("keydown", (e) => { if (e.key === "Enter") doUnlock(); });
   $("#btn-change-project").addEventListener("click", async () => {
     openSheet("#sheet-project");

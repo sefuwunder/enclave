@@ -129,6 +129,16 @@
   <div class="sheet hidden" id="sheet-unlock">
     <div class="sheet-title" id="unlock-title">Unlock Vault</div>
     <div class="sheet-msg" id="unlock-msg">Enter the vault passphrase. It stays in this server's memory until you lock.</div>
+    <div id="unlock-pgp" class="hidden">
+      <div class="seg">
+        <button type="button" id="seg-pass" class="seg-btn selected">Passphrase</button>
+        <button type="button" id="seg-pgp" class="seg-btn">PGP Key</button>
+      </div>
+      <div id="unlock-pgp-picker" class="hidden">
+        <select id="unlock-key" aria-label="PGP key"></select>
+        <div class="sheet-note">The new vault will be OpenPGP-encrypted to this key — opening it later needs the matching private key. If you generate a key, the passphrase above becomes that key's passphrase (blank = unprotected).</div>
+      </div>
+    </div>
     <input type="password" id="unlock-pass" placeholder="Passphrase" autocomplete="current-password">
     <div class="sheet-error hidden" id="unlock-error"></div>
     <div class="sheet-buttons">
