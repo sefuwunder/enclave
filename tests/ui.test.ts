@@ -1,7 +1,7 @@
 // UI server integration tests — real HTTP against startUiServer on an
 // ephemeral port, driving the whole flow the browser would.
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startUiServer } from "../src/server.ts";
@@ -126,5 +126,53 @@ describe("enclave UI server", () => {
     const rst = await post("/api/restore");
     expect(rst.data.restored).toBeGreaterThanOrEqual(1);
     expect(readFileSync(join(root, ".env"), "utf8")).toBe(envOrig);
+  });
+});
+
+describe("enclave UI stow endpoints", () => {
+  const bashrc = "export API_TOKEN=abc123def456ghi\n";
+  let sroot: string, starget: string, sbin: string, slog: string;
+  const savedPath = process.env.PATH;
+
+  beforeAll(() => {
+    sbin = mkdtempSync(join(tmpdir(), "enclave-ui-stow-bin-"));
+    slog = join(sbin, "calls.log");
+    writeFileSync(join(sbin, "stow"), "#!/bin/sh\necho \"$@\" >> \"" + slog + "\"\nexit 0\n");
+    chmodSync(join(sbin, "stow"), 0o755);
+    process.env.PATH = sbin + ":" + (savedPath || "");
+    sroot = mkdtempSync(join(tmpdir(), "enclave-ui-stow-"));
+    starget = mkdtempSync(join(tmpdir(), "enclave-ui-stow-target-"));
+    mkdirSync(join(sroot, "shell"));
+    writeFileSync(join(sroot, "shell", ".bashrc"), bashrc);
+  });
+  afterAll(async () => {
+    process.env.PATH = savedPath;
+    await post("/api/project", { dir: root }); // hand the session back
+    rmSync(sroot, { recursive: true, force: true });
+    rmSync(starget, { recursive: true, force: true });
+    rmSync(sbin, { recursive: true, force: true });
+  });
+
+  test("state reports stow fields; stow + unstow round-trip via API", async () => {
+    const p = await post("/api/project", { dir: sroot });
+    expect(p.data.stow).toBeNull();
+    expect(p.data.stowAvailable).toBe(true);
+    expect((await post("/api/unlock", { passphrase: "ui-stow-pass" })).status).toBe(200);
+    expect((await post("/api/seal")).status).toBe(200);
+    expect(readFileSync(join(sroot, "shell", ".bashrc"), "utf8")).toContain("enclave:API_TOKEN");
+
+    const st = await post("/api/stow", { target: starget });
+    expect(st.status).toBe(200);
+    expect(st.data.packages).toEqual(["shell"]);
+    expect(st.data.restored).toBe(1);
+    expect(readFileSync(join(sroot, "shell", ".bashrc"), "utf8")).toBe(bashrc);
+    expect(readFileSync(slog, "utf8")).toContain(`-d ${sroot} -t ${starget} shell`);
+    expect(st.data.state.stow.target).toBe(starget);
+
+    const un = await post("/api/unstow");
+    expect(un.status).toBe(200);
+    expect(un.data.sealed).toBe(1);
+    expect(readFileSync(join(sroot, "shell", ".bashrc"), "utf8")).toContain("enclave:API_TOKEN");
+    expect(readFileSync(slog, "utf8")).toContain("-D shell");
   });
 });

@@ -13,7 +13,9 @@ import { pgpAvailable, listAllKeys, generateKey, loadConfig, saveConfig } from "
 import {
   projectOf, defaultVaultPath, loadManifest, sealTree, verifyTree,
   restoreTree, envEntries, injectEnvFile, extractBlobBytes,
+  stowPackages, unstowPackages,
 } from "./core.ts";
+import { stowAvailable } from "./stow.ts";
 
 interface Session {
   dir: string;
@@ -55,6 +57,8 @@ function stateJson() {
     vaultScheme: scheme,
     pgpRecipient,
     manifest: manifest ? { entries: manifest.entries } : null,
+    stow: manifest?.stow ? { target: manifest.stow.target } : null,
+    stowAvailable: stowAvailable(),
     entries: session.vault ? session.vault.entries.map(publicEntry) : [],
   };
 }
@@ -214,6 +218,29 @@ export function startUiServer(port: number) {
           const locked = requireUnlocked(); if (locked) return locked;
           const r = restoreTree(session.dir, session.vault!);
           return json({ ...r, state: stateJson() });
+        }
+
+        if (p === "/api/stow" && req.method === "POST") {
+          const locked = requireUnlocked(); if (locked) return locked;
+          if (!stowAvailable()) return err("GNU stow is not installed on this machine");
+          const b = await body(req);
+          try {
+            const r = stowPackages(session.dir, session.vault!, {
+              restow: b.restow === true,
+              target: typeof b.target === "string" ? b.target : undefined,
+            });
+            return json({ ...r, state: stateJson() });
+          } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
+        }
+
+        if (p === "/api/unstow" && req.method === "POST") {
+          const locked = requireUnlocked(); if (locked) return locked;
+          if (!stowAvailable()) return err("GNU stow is not installed on this machine");
+          try {
+            const r = unstowPackages(session.dir, session.vault!);
+            persistVault();
+            return json({ ...r, state: stateJson() });
+          } catch (e) { return err(e instanceof Error ? e.message : String(e)); }
         }
 
         if (p === "/api/inject" && req.method === "POST") {

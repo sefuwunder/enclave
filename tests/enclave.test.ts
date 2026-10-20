@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { encryptVaultPassphrase, decryptPassphrase, emptyVault, type VaultData } from "../src/vault.ts";
-import { scanTextContent, scanEnvContent, scanTree, scanBlob, shannonEntropy, isPlaceholder } from "../src/scan.ts";
+import { scanTextContent, scanEnvContent, scanTree, scanBlob, shannonEntropy, isPlaceholder, fileKind, isCharsetConstant, looksLikeReference } from "../src/scan.ts";
 
 describe("vault crypto", () => {
   const data: VaultData = {
@@ -92,6 +92,59 @@ describe("scanner detectors", () => {
     expect(isPlaceholder("enclave:FOO")).toBe(true);
     expect(isPlaceholder("real-value-123")).toBe(false);
     expect(isPlaceholder("abc")).toBe(true);
+  });
+});
+
+describe("code-file calibration (false-positive control)", () => {
+  test("realistic TypeScript with no secrets scans clean", () => {
+    const src = [
+      'import { readFileSync } from "node:fs";',
+      'const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";',
+      "const TOKEN_RE = /(?:ghp_[A-Za-z0-9]{36}|AKIA[0-9A-Z]{16})/;",
+      "const SECRETY = /key|secret|token|pass/i;",
+      'export const TOKEN_PREFIX = "enclave:";',
+      "const config = {",
+      '  apiKey: process.env.WIDGET_API_KEY ?? "",',
+      '  password: "",',
+      "  secret: undefined,",
+      '  token: "your-token-here",',
+      '  signingSecret: "whsec_example_for_docs",',
+      "};",
+      "const token = TOKEN_PREFIX + name;",
+      "const hasSecret = list[9] !== undefined;",
+      "const looksSecret = SECRETY.test(key) || raw.length >= 12;",
+      'const sha = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";',
+      'const uuid = "550e8400-e29b-41d4-a716-446655440000";',
+    ].join("\n");
+    expect(scanTextContent("src/app.ts", src)).toEqual([]);
+  });
+  test("hardcoded quoted secret in TypeScript is still caught, once", () => {
+    const f = scanTextContent("src/app.ts", 'const cfg = { apiKey: "Xk9mQ2vLp8wR4nZ7bH3dF6sA1" };');
+    expect(f.length).toBe(1);
+    expect(f[0].kind).toBe("assignment");
+    expect(f[0].value).toBe("Xk9mQ2vLp8wR4nZ7bH3dF6sA1");
+  });
+  test("bare assignments count in config/shell, references never do", () => {
+    const yaml = scanTextContent("cfg.yaml", "db_password: Tr0ub4dor-3-secret");
+    expect(yaml.some((x) => x.kind === "assignment")).toBe(true);
+    const refs = scanTextContent("cfg.yaml", "password: prefix(abcdefgh)\ntoken: $OTHER_TOKEN");
+    expect(refs).toEqual([]);
+    const sh = scanTextContent("deploy.sh", "export API_TOKEN=abc123def456");
+    expect(sh.some((x) => x.kind === "assignment")).toBe(true);
+    const shRef = scanTextContent("deploy.sh", "export API_TOKEN=$OTHER_TOKEN");
+    expect(shRef).toEqual([]);
+  });
+  test("calibration helpers", () => {
+    expect(fileKind("a.ts")).toBe("code");
+    expect(fileKind("users.csv")).toBe("data");
+    expect(fileKind("notes.md")).toBe("text");
+    expect(fileKind("deploy.sh")).toBe("text");
+    expect(isCharsetConstant("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")).toBe(true);
+    expect(isCharsetConstant("Xk9mQ2vLp8wR4nZ7bH3dF6sA1")).toBe(false);
+    expect(looksLikeReference("list[9])")).toBe(true);
+    expect(looksLikeReference("$OTHER_TOKEN")).toBe(true);
+    expect(looksLikeReference("Tr0ub4dor-3-secret")).toBe(false);
+    expect(looksLikeReference("abc123def456ghi")).toBe(false);
   });
 });
 

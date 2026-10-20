@@ -36,6 +36,19 @@ overridden with `--vault <path>`.
 - Secret-named assignments (`api_key = "…"`, `"db_password": "…"`)
 - Bare high-entropy quoted strings
 
+Detectors are calibrated by file kind, because code is not data. In
+code files (`.ts`, `.py`, `.go`, …) only a *quoted string literal*
+assigned to a secret-named key counts — an unquoted right-hand side is
+a reference (`process.env.X`), an expression, or a regex literal, and
+flagging those drowned real findings in false positives. Outside code
+(config, shell, docs) bare values count too, since a bare word there is
+the literal. Character-set constants (base64 alphabets, keyboard maps)
+are never flagged, and neither are placeholder values. Known token
+*shapes* (AWS/GitHub/Stripe/…) are always flagged, in every file kind —
+a shape match is unambiguous. The test suite's own fixture strings are
+shaped like secrets on purpose, so scanning this repo flags those and
+only those.
+
 **Personal data (PII)**
 - SSNs (any text file)
 - Email addresses in data files (`.csv`, `.sql`, `.json`, `.xml`, …) —
@@ -84,8 +97,44 @@ Placeholder-looking values (`your-api-key`, `changeme`, `${…}`,
 | `enclave inject [dir] [--out f]` | write env file (default `.env.local`, mode 600) |
 | `enclave run [dir] -- <cmd…>` | run a command with vault entries as env vars |
 | `enclave restore [dir]` | undo a seal, byte-exact; manifest removed, vault kept |
+| `enclave stow [dir] [pkg…]` | restore secrets, then GNU-stow the packages into the target |
+| `enclave unstow [dir] [pkg…]` | GNU-stow `-D` the packages, then seal the secrets back |
 
 Blobs are never exported as env vars by `inject`/`run`.
+
+## Dotfiles with GNU Stow
+
+If your dotfiles live in a [GNU Stow](https://www.gnu.org/software/stow/)
+tree — one subdirectory per package, symlinked into `$HOME` — enclave
+wraps the two moments that matter:
+
+```sh
+cd ~/dotfiles
+enclave seal --apply --stow            # seal; record target "~" in the manifest
+enclave stow                           # restore values, then stow links them live
+enclave unstow                         # stow -D removes the links, secrets seal back
+```
+
+`seal --stow [--target <dir>]` stores the target in the manifest
+(verbatim — `~` by default — so a committed manifest never leaks an
+absolute home path). `enclave stow [pkg…]` restores the vault's values
+into the packages first, then runs real GNU stow (`-R` with `--restow`,
+`--adopt` passes through); with no package names, every package
+directory in the tree is stowed. `enclave unstow` unlinks first, then
+seals — afterwards the tree is safe to commit and the target no longer
+reaches the secrets. Plaintext exists in the tree only while it is
+stowed.
+
+Notes:
+
+- Scan the stow *directory*, not the target: scan doesn't follow
+  symlinks, so a stowed `$HOME` shows nothing (by design).
+- `enclave restore` on a stow tree removes the manifest, stow target
+  record included — prefer `stow`/`unstow`, which preserve it.
+- GNU stow must be installed (`apt install stow` / `brew install
+  stow`); enclave shells out to it and never writes links itself. The
+  UI shows **Stow…** / **Unstow + Seal** buttons in the Vault toolbar
+  for stow-managed trees when stow is on the machine.
 
 ## Web UI
 

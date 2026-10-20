@@ -7,12 +7,18 @@ import { createHash } from "node:crypto";
 import { join, resolve, basename } from "node:path";
 import { homedir } from "node:os";
 import { scanTree, type Finding } from "./scan.ts";
+import { listPackages, runStow, expandTarget } from "./stow.ts";
 import type { VaultData, VaultEntry } from "./vault.ts";
 
 export const TOKEN_PREFIX = "enclave:";
 
 export interface ManifestEntry { name: string; file: string; line: number; kind: string }
-export interface Manifest { v: 1; project: string; entries: ManifestEntry[] }
+export interface Manifest {
+  v: 1; project: string; entries: ManifestEntry[];
+  // Present when the tree is a GNU Stow directory: the link target,
+  // stored verbatim ("~" by default) so a committed manifest stays portable.
+  stow?: { target: string };
+}
 
 export function projectOf(dir: string): string {
   return basename(resolve(dir)).replace(/[^A-Za-z0-9_.-]+/g, "-");
@@ -201,6 +207,83 @@ export function restoreTree(dir: string, vault: VaultData): RestoreResult {
   }
   deleteManifest(dir);
   return { restored, missing, warnings };
+}
+
+/* ------------------------- GNU Stow flows ------------------------- */
+// The manifest's stow config survives seal (sealTree mutates the loaded
+// manifest object) but NOT restore (restoreTree deletes the manifest), so
+// stowPackages re-saves the config with zero entries after restoring.
+
+export function markStowManaged(dir: string, target: string): boolean {
+  const m = loadManifest(dir);
+  if (!m) return false;
+  m.stow = { target };
+  saveManifest(dir, m);
+  return true;
+}
+
+export interface StowOpts {
+  target?: string;      // flag wins over the manifest, manifest over "~"
+  packages?: string[];  // default: every package dir in the tree
+  restow?: boolean;
+  adopt?: boolean;
+  env?: Record<string, string | undefined>; // for tests: stubbed PATH
+}
+
+function stowContext(dir: string, opts: StowOpts): {
+  manifest: Manifest | null; target: string; targetRaw: string; packages: string[];
+} {
+  const manifest = loadManifest(dir);
+  const targetRaw = opts.target ?? manifest?.stow?.target ?? "~";
+  return {
+    manifest,
+    targetRaw,
+    target: expandTarget(targetRaw),
+    packages: opts.packages && opts.packages.length ? opts.packages : listPackages(dir),
+  };
+}
+
+export interface StowFlowResult {
+  packages: string[]; target: string; restored: number; stowOutput: string;
+}
+
+// Restore the vault's values into the packages, then let GNU stow link
+// them into the target. Plaintext exists in the tree only while stowed.
+export function stowPackages(dir: string, vault: VaultData | null, opts: StowOpts = {}): StowFlowResult {
+  const { manifest, target, targetRaw, packages } = stowContext(dir, opts);
+  if (!packages.length) throw new Error("no stow packages (subdirectories) found in " + dir);
+  let restored = 0;
+  if (manifest && manifest.entries.length) {
+    if (!vault) throw new Error("this tree has sealed secrets — unlock the vault to stow");
+    restored = restoreTree(dir, vault).restored;
+    // restoreTree deleted the manifest; keep the stow config on record.
+    saveManifest(dir, { v: 1, project: projectOf(dir), entries: [], stow: { target: targetRaw } });
+  }
+  const run = runStow(dir, target, packages, opts.restow ? "restow" : "stow",
+    { adopt: opts.adopt, env: opts.env });
+  return { packages, target, restored, stowOutput: run.output };
+}
+
+export interface UnstowFlowResult {
+  packages: string[]; target: string; sealed: number; stowOutput: string;
+}
+
+// Unlink the packages from the target, then seal the values back into the
+// vault (mutated in place; the caller persists it). Afterwards the tree is
+// safe to commit and the target no longer reaches the secrets.
+export function unstowPackages(dir: string, vault: VaultData | null, opts: StowOpts = {}): UnstowFlowResult {
+  const { manifest, target, targetRaw, packages } = stowContext(dir, opts);
+  if (!packages.length) throw new Error("no stow packages (subdirectories) found in " + dir);
+  const run = runStow(dir, target, packages, "unstow", { env: opts.env });
+  let sealed = 0;
+  if (vault) {
+    sealed = sealTree(dir, vault).sealed;
+    // keep the stow config recorded even if this seal created the manifest
+    if ((manifest?.stow || opts.target) && loadManifest(dir)) {
+      markStowManaged(dir, targetRaw);
+    }
+  }
+  return { packages, target, sealed, stowOutput: run.output };
 }
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;

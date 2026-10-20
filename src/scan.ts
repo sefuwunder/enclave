@@ -73,15 +73,70 @@ const TOKEN_RULES: Rule[] = [
   { kind: "private-key", re: /(-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----)/, group: 1 },
 ];
 
-// key[:=] "value" where the key name smells like a secret (key may be quoted)
-const ASSIGN_RE =
-  /["']?([A-Za-z0-9_.-]*(?:api[_-]?key|secret|token|passwd|password|credential|private[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)["']?\s*[:=]\s*["']?([^\s"'`,;]{8,})["']?/i;
+// key[:=] value where the key name smells like a secret (key may be quoted).
+// Two shapes, calibrated by file kind (see fileKind below):
+//  - QUOTED: the value is a string literal — counts in every file kind.
+//  - BARE: an unquoted value — counts only outside code files. In code an
+//    unquoted RHS is a reference (process.env.X, TOKEN_PREFIX), an
+//    expression (arr[9]), or a regex literal, almost never a literal secret;
+//    treating it as one was the main source of false positives in .ts/.py
+//    sources. Even outside code, bare values that are plain references or
+//    code fragments are filtered by looksLikeReference.
+const SECRETY_KEYNAME = String.raw`[A-Za-z0-9_.-]*(?:api[_-]?key|secret|token|passwd|password|credential|private[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*`;
+const ASSIGN_QUOTED_RE = new RegExp(
+  String.raw`["']?(${SECRETY_KEYNAME})["']?\s*[:=]\s*(["'\x60])((?:(?!\2)[^\\]|\\.)*)\2`, "i");
+const ASSIGN_BARE_RE = new RegExp(
+  String.raw`["']?(${SECRETY_KEYNAME})["']?\s*[:=]\s*["']?([^\s"'\x60,;]{8,})["']?`, "i");
+
+// A bare (unquoted) value that is really a reference or a code fragment.
+// Note what is NOT here: a plain alphanumeric word. In the file kinds the
+// bare rule applies to (config, shell, docs) a bare word IS the literal
+// value — shell needs $ to dereference, YAML has no bare references — so
+// excluding identifier-shaped values would eat real hex/base tokens.
+export function looksLikeReference(value: string): boolean {
+  if (/[()\[\]{}]/.test(value)) return true;  // call, index, object fragment
+  if (value.startsWith("$")) return true;     // shell-style $VAR / ${...} reference
+  return false;
+}
+
+// A quoted string that is a character set, not a secret: long, almost all
+// unique characters, with a long ascending run (alphabets, base64 tables,
+// keyboard maps). Real random secrets are not sequential.
+export function isCharsetConstant(value: string): boolean {
+  if (value.length < 24) return false;
+  if (new Set(value).size / value.length < 0.9) return false;
+  let run = 1, maxRun = 1;
+  for (let i = 1; i < value.length; i++) {
+    run = value.charCodeAt(i) === value.charCodeAt(i - 1) + 1 ? run + 1 : 1;
+    if (run > maxRun) maxRun = run;
+  }
+  return maxRun >= 10;
+}
 // any quoted string that could be a bare credential
 const QUOTED_RE = /["']([A-Za-z0-9+/=_-]{20,})["']/g;
 // personal data in text: SSNs anywhere (distinctive shape), emails in data files
 const SSN_RE = /\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b/;
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
 const DATA_FILE_EXTS = new Set([".csv", ".tsv", ".sql", ".json", ".xml", ".ndjson"]);
+
+// File kinds calibrate the detectors: code files get the strict rules
+// (quoted-literal assignments only, no bare high-entropy guesses at
+// references), data files get PII email detection, everything else is
+// general text/config where bare assignments are idiomatic (.yaml,
+// .toml, shell scripts, Dockerfiles).
+const CODE_EXTS = new Set([
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts",
+  ".py", ".rb", ".go", ".rs", ".java", ".kt", ".kts", ".swift", ".cs",
+  ".php", ".c", ".h", ".cpp", ".cc", ".cxx", ".hpp", ".lua", ".pl", ".pm",
+  ".r", ".scala", ".hs", ".ml", ".ex", ".exs", ".erl", ".clj", ".vim", ".el",
+]);
+export type FileKind = "code" | "data" | "text";
+export function fileKind(rel: string): FileKind {
+  const ext = extname(rel).toLowerCase();
+  if (CODE_EXTS.has(ext)) return "code";
+  if (DATA_FILE_EXTS.has(ext)) return "data";
+  return "text";
+}
 
 function isEnvFile(name: string): boolean {
   return name === ".env" || name.startsWith(".env.") || name.endsWith(".env");
@@ -120,6 +175,7 @@ export function scanEnvContent(rel: string, content: string): Finding[] {
 }
 
 export function scanTextContent(rel: string, content: string): Finding[] {
+  const kind = fileKind(rel);
   const out: Finding[] = [];
   const seen = new Set<string>(); // line:start dedupe across rules
   const lines = content.split("\n");
@@ -163,16 +219,32 @@ export function scanTextContent(rel: string, content: string): Finding[] {
         });
       }
     }
-    const am = line.match(ASSIGN_RE);
-    if (am && am.index !== undefined) {
-      const value = am[2];
-      if (!isPlaceholder(value)) {
-        const start = line.lastIndexOf(value);
+    // assignment detectors: a quoted string literal counts in any file;
+    // a bare value counts only outside code (and never when it is really
+    // a reference or code fragment). See the regex definitions above.
+    const qa = line.match(ASSIGN_QUOTED_RE);
+    if (qa && qa.index !== undefined) {
+      const value = qa[3];
+      if (value.length >= 8 && !isPlaceholder(value)) {
+        const start = qa.index + qa[0].lastIndexOf(value);
         push({
           file: rel, line: i + 1, start, end: start + value.length,
           offsetStart: lineOffset + start, offsetEnd: lineOffset + start + value.length,
-          kind: "assignment", keyName: slug(am[1]), value,
+          kind: "assignment", keyName: slug(qa[1]), value,
         });
+      }
+    } else if (kind !== "code") {
+      const am = line.match(ASSIGN_BARE_RE);
+      if (am && am.index !== undefined) {
+        const value = am[2];
+        if (!isPlaceholder(value) && !looksLikeReference(value)) {
+          const start = line.lastIndexOf(value);
+          push({
+            file: rel, line: i + 1, start, end: start + value.length,
+            offsetStart: lineOffset + start, offsetEnd: lineOffset + start + value.length,
+            kind: "assignment", keyName: slug(am[1]), value,
+          });
+        }
       }
     }
     // bare high-entropy quoted strings (lower confidence, still sealed)
@@ -181,6 +253,7 @@ export function scanTextContent(rel: string, content: string): Finding[] {
     while ((qm = QUOTED_RE.exec(line)) !== null) {
       const value = qm[1];
       if (isPlaceholder(value)) continue;
+      if (isCharsetConstant(value)) continue; // alphabets / base64 tables, not secrets
       const hasUpper = /[A-Z]/.test(value), hasLower = /[a-z]/.test(value), hasDigit = /[0-9]/.test(value);
       if (!(hasUpper && hasLower && hasDigit)) continue;
       if (shannonEntropy(value) < 4.3) continue;
@@ -204,7 +277,7 @@ export function scanTextContent(rel: string, content: string): Finding[] {
         value: sm[0],
       });
     }
-    if (DATA_FILE_EXTS.has(extname(rel).toLowerCase())) {
+    if (kind === "data") {
       const em = line.match(EMAIL_RE);
       if (em && em.index !== undefined) {
         push({

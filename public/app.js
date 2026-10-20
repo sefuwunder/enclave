@@ -71,6 +71,10 @@ function renderState() {
     $("#vault-state").textContent += " · PGP";
     if (st.pgpRecipient) $("#vault-path").textContent = st.vaultPath + "\n→ " + st.pgpRecipient.slice(-16);
   }
+  // Stow controls exist only for stow-managed trees on machines with stow.
+  const showStow = !!(st.stow && st.stowAvailable);
+  $("#btn-stow").classList.toggle("hidden", !showStow);
+  $("#btn-unstow").classList.toggle("hidden", !showStow);
   renderVault();
 }
 
@@ -250,6 +254,47 @@ async function doRestore() {
         await doVerify();
         setStatus(`Restored ${r.restored} secret(s)${r.missing ? `, ${r.missing} not found` : ""}.`);
       } catch (e) { setStatus("Restore failed: " + e.message); }
+    },
+  });
+}
+
+async function doStow() {
+  if (S.state.locked) { openUnlock("Stow needs the vault — unlock first."); return; }
+  const target = S.state.stow ? S.state.stow.target : "~";
+  showConfirm({
+    title: "Restore secrets and stow the packages?",
+    msg: "Sealed values are written back into the packages first, then GNU Stow links them into " + target + ". Plaintext lives in the tree while it is stowed — use Unstow + Seal to lock it away again.",
+    confirmLabel: "Stow",
+    onConfirm: async () => {
+      try {
+        const r = await post("/api/stow");
+        S.state = r.state;
+        S.revealed.clear();
+        renderState();
+        await doScan(true);
+        setStatus(`Stowed ${r.packages.length} package(s) into ${r.target}${r.restored ? ` · restored ${r.restored} secret(s)` : ""}: ${r.packages.join(", ")}`);
+      } catch (e) { setStatus("Stow failed: " + e.message); }
+    },
+  });
+}
+
+async function doUnstow() {
+  if (S.state.locked) { openUnlock("Unstow needs the vault — unlock first."); return; }
+  const target = S.state.stow ? S.state.stow.target : "~";
+  showConfirm({
+    title: "Unstow and seal the secrets back?",
+    msg: "GNU Stow removes the package links from " + target + ", then every plaintext secret in the tree is sealed into the vault. The tree is left safe to commit.",
+    confirmLabel: "Unstow + Seal",
+    onConfirm: async () => {
+      try {
+        const r = await post("/api/unstow");
+        S.state = r.state;
+        S.revealed.clear();
+        renderState();
+        await doScan(true);
+        await doVerify();
+        setStatus(`Unstowed ${r.packages.length} package(s) from ${r.target} · sealed ${r.sealed} secret(s).`);
+      } catch (e) { setStatus("Unstow failed: " + e.message); }
     },
   });
 }
@@ -481,6 +526,8 @@ function init() {
   $("#btn-rescan").addEventListener("click", () => doScan());
   $("#btn-seal").addEventListener("click", doSeal);
   $("#btn-restore").addEventListener("click", doRestore);
+  $("#btn-stow").addEventListener("click", doStow);
+  $("#btn-unstow").addEventListener("click", doUnstow);
   $("#btn-inject").addEventListener("click", doInject);
   $("#btn-clear-output").addEventListener("click", () => { $("#run-output").innerHTML = ""; });
   $("#verify-badge").addEventListener("click", async () => { await doVerify(); setStatus("Verification re-run."); });

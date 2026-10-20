@@ -10,6 +10,8 @@
 //   enclave inject [dir] [--out <file>]   write env file from the vault (default .env.local)
 //   enclave run    [dir] -- <cmd...>      run a command with vault secrets as env vars
 //   enclave restore [dir]                 put sealed values back, byte-exact
+//   enclave stow   [dir] [pkg...]         restore secrets, then GNU-stow packages
+//   enclave unstow [dir] [pkg...]         GNU-stow -D packages, then seal back
 //   enclave ui     [--port 3039]          macOS-style web UI (127.0.0.1)
 //
 // The vault lives OUTSIDE the tree at ~/.enclave/<project>.vault.enc
@@ -24,7 +26,9 @@ import { pgpAvailable, listAllKeys, findKey, generateKey, loadConfig, saveConfig
 import {
   TOKEN_PREFIX, projectOf, defaultVaultPath, manifestPath, loadManifest,
   sealTree, verifyTree, restoreTree, envEntries, injectEnvFile, extractBlobBytes,
+  stowPackages, unstowPackages, markStowManaged,
 } from "./core.ts";
+import { stowAvailable } from "./stow.ts";
 
 function fail(msg: string): never {
   console.error("enclave: " + msg);
@@ -92,7 +96,7 @@ async function openVault(vpath: string): Promise<{ vault: VaultData; auth: Vault
   return { vault: loadVault(vpath, auth), auth, info };
 }
 
-const BOOLEAN_FLAGS = new Set(["--apply", "--reveal", "--pgp", "--no-protection"]);
+const BOOLEAN_FLAGS = new Set(["--apply", "--reveal", "--pgp", "--no-protection", "--stow", "--restow", "--adopt"]);
 function parseArgs(argv: string[]) {
   const flags = new Map<string, string | boolean>();
   const positional: string[] = [];
@@ -133,8 +137,15 @@ async function cmdScan(dir: string): Promise<void> {
 
 async function cmdSeal(dir: string, flags: Map<string, string | boolean>): Promise<void> {
   const apply = flags.get("--apply") === true;
+  const noteStow = () => {
+    if (flags.get("--stow") !== true) return;
+    const target = typeof flags.get("--target") === "string" ? flags.get("--target") as string : "~";
+    if (markStowManaged(dir, target)) {
+      console.log(`Recorded as a GNU Stow directory (target ${target}) — link it with: enclave stow`);
+    }
+  };
   const findings = scanTree(dir);
-  if (!findings.length) { console.log("Nothing to seal — tree is clean."); return; }
+  if (!findings.length) { console.log("Nothing to seal — tree is clean."); noteStow(); return; }
   if (!apply) {
     console.log("Dry run — would seal:");
     printFindings(findings);
@@ -165,6 +176,7 @@ async function cmdSeal(dir: string, flags: Map<string, string | boolean>): Promi
   saveVault(vpath, vault, auth);
   console.log(`Sealed ${result.sealed} secret(s) into ${vpath}${auth.recipient ? ` (PGP → ${auth.recipient})` : ""}`);
   console.log(`Manifest: ${manifestPath(dir)} (${loadManifest(dir)?.entries.length ?? 0} entries, no values).`);
+  noteStow();
 }
 
 async function cmdVerify(dir: string): Promise<void> {
@@ -246,6 +258,69 @@ async function cmdRestore(dir: string, flags: Map<string, string | boolean>): Pr
   const r = restoreTree(dir, vault);
   for (const w of r.warnings) console.log("warning: " + w);
   console.log(`Restored ${r.restored} secret(s)${r.missing ? `, ${r.missing} placeholder(s) not found` : ""}. Manifest removed; vault kept at ${vaultPathFor(dir, flags)}.`);
+}
+
+/* ------------------------- stow subcommands ------------------------- */
+
+function requireStow(): void {
+  if (!stowAvailable()) {
+    fail("GNU stow is not installed (or not on PATH) — install it first, e.g. 'sudo apt install stow' / 'brew install stow'");
+  }
+}
+
+async function cmdStow(positional: string[], flags: Map<string, string | boolean>): Promise<void> {
+  requireStow();
+  const dir = resolve(positional[0] || ".");
+  const packages = positional.slice(1);
+  const manifest = loadManifest(dir);
+  const vault = manifest && manifest.entries.length ? await withVault(dir, flags) : null;
+  const r = stowPackages(dir, vault, {
+    target: typeof flags.get("--target") === "string" ? flags.get("--target") as string : undefined,
+    packages: packages.length ? packages : undefined,
+    restow: flags.get("--restow") === true,
+    adopt: flags.get("--adopt") === true,
+  });
+  if (r.restored) console.log(`Restored ${r.restored} secret(s) into the tree.`);
+  if (r.stowOutput) console.log(r.stowOutput);
+  console.log(`Stowed ${r.packages.length} package(s) into ${r.target}: ${r.packages.join(", ")}`);
+}
+
+async function cmdUnstow(positional: string[], flags: Map<string, string | boolean>): Promise<void> {
+  requireStow();
+  const dir = resolve(positional[0] || ".");
+  const packages = positional.slice(1);
+  const vpath = vaultPathFor(dir, flags);
+  const opts = {
+    target: typeof flags.get("--target") === "string" ? flags.get("--target") as string : undefined,
+    packages: packages.length ? packages : undefined,
+  };
+  // Nothing plaintext and no vault yet: a plain unlink needs no vault work.
+  if (!vaultExists(vpath) && scanTree(dir).length === 0) {
+    const r = unstowPackages(dir, null, opts);
+    if (r.stowOutput) console.log(r.stowOutput);
+    console.log(`Unstowed ${r.packages.length} package(s) from ${r.target}: ${r.packages.join(", ")} (tree already clean, no vault created)`);
+    return;
+  }
+  let vault: VaultData;
+  let auth: VaultAuth;
+  if (vaultExists(vpath)) {
+    const opened = await openVault(vpath);
+    vault = opened.vault;
+    auth = opened.auth;
+  } else if (flags.get("--pgp") === true) {
+    if (!pgpAvailable()) fail("gpg is not available on this system");
+    const key = resolveRecipient(typeof flags.get("--recipient") === "string" ? flags.get("--recipient") as string : undefined);
+    auth = { recipient: key.fingerprint, keyring: key.keyring };
+    vault = emptyVault(projectOf(dir));
+  } else {
+    auth = { passphrase: await getPassphrase(true) };
+    vault = emptyVault(projectOf(dir));
+  }
+  const r = unstowPackages(dir, vault, opts);
+  saveVault(vpath, vault, auth);
+  if (r.stowOutput) console.log(r.stowOutput);
+  console.log(`Unstowed ${r.packages.length} package(s) from ${r.target}: ${r.packages.join(", ")}`);
+  console.log(`Sealed ${r.sealed} secret(s) back into ${vpath} — the tree is safe to commit.`);
 }
 
 /* ------------------------- pgp subcommands ------------------------- */
@@ -332,6 +407,11 @@ const USAGE = `enclave — secrets enclave manager for source trees
   enclave inject  [dir] [--out <file>]  write env file (default <dir>/.env.local)
   enclave run     [dir] -- <cmd...>     run with vault secrets as env vars
   enclave restore [dir]                 put sealed values back, byte-exact
+  enclave stow    [dir] [pkg...] [--target <dir>] [--restow] [--adopt]
+                                        restore secrets, then GNU-stow the packages
+  enclave unstow  [dir] [pkg...] [--target <dir>]
+                                        GNU-stow -D the packages, then seal secrets back
+  enclave seal --stow [--target <dir>]  record the tree as a stow directory (target in manifest)
   enclave ui      [--port 3039]         macOS-style web UI on 127.0.0.1
   enclave seal --pgp [--recipient <fpr>]  seal into a PGP-encrypted vault instead
   enclave pgp init [--name N] [--email E] [--no-protection]
@@ -372,6 +452,8 @@ async function main(): Promise<void> {
       return cmdRun(runDir, flags, runCmd);
     }
     case "restore": return cmdRestore(dir, flags);
+    case "stow": return cmdStow(positional, flags);
+    case "unstow": return cmdUnstow(positional, flags);
     case "ui": return cmdUi(flags);
     case "pgp": {
       const sub = positional[0];
